@@ -1,0 +1,26 @@
+{
+  "name": "saas-dashboard",
+  "version": "1.0.0",
+  "description": "Node.js + Tailwind SaaS dashboard starter",
+  "main": "server.js",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/input.css -o ./public/css/tailwind.css --minify",
+    "watch:css": "tailwindcss -i ./src/input.css -o ./public/css/tailwind.css --watch",
+    "start": "npm run build:css && node server.js",
+    "dev": "npm run build:css && node server.js",
+    "perf:bench": "bash ./scripts/perf-benchmark.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ejs": "^4.0.1",
+    "express": "^5.2.1",
+    "multer": "^2.0.2",
+    "pg": "^8.18.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

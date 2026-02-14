@@ -1,0 +1,977 @@
+const crypto = require("crypto");
+const { Pool } = require("pg");
+
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeScope(value) {
+  if (value === null || value === undefined) {
+    return "*";
+  }
+  const text = String(value).trim().toLowerCase();
+  return text.length === 0 ? "*" : text;
+}
+
+function normalizeColumnName(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function toJobResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    jobType: row.job_type ?? row.jobType,
+    status: row.status,
+    payload: row.payload ?? null,
+    result: row.result ?? null,
+    error: row.error ?? null,
+    attempts: row.attempts ?? 0,
+    createdAt: row.created_at ?? row.createdAt,
+    startedAt: row.started_at ?? row.startedAt ?? null,
+    completedAt: row.completed_at ?? row.completedAt ?? null,
+  };
+}
+
+class InMemoryRepository {
+  constructor() {
+    this.ontologyFields = new Map();
+    this.columnOverrides = new Map();
+    this.datasets = new Map();
+    this.jobs = new Map();
+    this.agents = new Map();
+    this.deployments = new Map();
+  }
+
+  async init() {}
+
+  type() {
+    return "memory";
+  }
+
+  async listOntologyFields() {
+    return Array.from(this.ontologyFields.values()).map((field) => deepClone(field));
+  }
+
+  async upsertOntologyFields(fields) {
+    for (const field of fields) {
+      const now = new Date().toISOString();
+      const previous = this.ontologyFields.get(field.key);
+      this.ontologyFields.set(field.key, {
+        key: field.key,
+        label: field.label,
+        aliases: deepClone(field.aliases || []),
+        valueAliases: deepClone(field.valueAliases || {}),
+        createdAt: previous?.createdAt || now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  async listColumnOverrides() {
+    return Array.from(this.columnOverrides.values()).map((entry) => deepClone(entry));
+  }
+
+  async upsertColumnOverride({ companyName, sourceColumn, canonicalField }) {
+    const companyScope = normalizeScope(companyName);
+    const sourceColumnNorm = normalizeColumnName(sourceColumn);
+    const key = `${companyScope}::${sourceColumnNorm}`;
+    const now = new Date().toISOString();
+    const previous = this.columnOverrides.get(key);
+
+    const value = {
+      id: previous?.id || crypto.randomUUID(),
+      companyScope,
+      sourceColumn: String(sourceColumn || "").trim(),
+      sourceColumnNorm,
+      canonicalField,
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+    };
+
+    this.columnOverrides.set(key, value);
+    return deepClone(value);
+  }
+
+  async createDataset(dataset) {
+    this.datasets.set(dataset.id, deepClone(dataset));
+    return deepClone(dataset);
+  }
+
+  async listDatasets() {
+    return Array.from(this.datasets.values()).map((dataset) => ({
+      id: dataset.id,
+      companyName: dataset.companyName,
+      sourceName: dataset.sourceName,
+      createdAt: dataset.createdAt,
+      rowCount: dataset.rowCount,
+      mappedColumns: Array.isArray(dataset.columnMapping) ? dataset.columnMapping.length : 0,
+    }));
+  }
+
+  async getDataset(datasetId) {
+    const dataset = this.datasets.get(datasetId);
+    return dataset ? deepClone(dataset) : null;
+  }
+
+  async getDatasetsByIds(datasetIds) {
+    if (!Array.isArray(datasetIds) || datasetIds.length === 0) {
+      return Array.from(this.datasets.values()).map((dataset) => deepClone(dataset));
+    }
+
+    return datasetIds
+      .map((id) => this.datasets.get(id))
+      .filter(Boolean)
+      .map((dataset) => deepClone(dataset));
+  }
+
+  async enqueueJob({ jobType, payload }) {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const job = {
+      id,
+      jobType,
+      status: "pending",
+      payload: deepClone(payload),
+      result: null,
+      error: null,
+      attempts: 0,
+      createdAt: now,
+      startedAt: null,
+      completedAt: null,
+    };
+
+    this.jobs.set(id, job);
+    return deepClone(job);
+  }
+
+  async listJobs(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const jobs = Array.from(this.jobs.values()).sort((a, b) => {
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    return jobs.slice(0, safeLimit).map((job) => deepClone(job));
+  }
+
+  async getJob(jobId) {
+    const job = this.jobs.get(jobId);
+    return job ? deepClone(job) : null;
+  }
+
+  async claimPendingJob() {
+    const pending = Array.from(this.jobs.values())
+      .filter((job) => job.status === "pending")
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())[0];
+
+    if (!pending) {
+      return null;
+    }
+
+    pending.status = "running";
+    pending.startedAt = new Date().toISOString();
+    pending.attempts += 1;
+    pending.error = null;
+    this.jobs.set(pending.id, pending);
+    return deepClone(pending);
+  }
+
+  async completeJob(jobId, result) {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      return null;
+    }
+    job.status = "completed";
+    job.result = deepClone(result || {});
+    job.error = null;
+    job.completedAt = new Date().toISOString();
+    this.jobs.set(jobId, job);
+    return deepClone(job);
+  }
+
+  async failJob(jobId, errorMessage) {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      return null;
+    }
+    job.status = "failed";
+    job.error = String(errorMessage || "unknown_error");
+    job.completedAt = new Date().toISOString();
+    this.jobs.set(jobId, job);
+    return deepClone(job);
+  }
+
+  async createAgent({ name, modelTier, systemPrompt, tools, skills, avatarUrl }) {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const normalizedTools = Array.isArray(tools)
+      ? [...new Set(tools.map((item) => String(item).trim()).filter(Boolean))]
+      : [];
+    const normalizedSkills = Array.isArray(skills)
+      ? [...new Set(skills.map((item) => String(item).trim()).filter(Boolean))]
+      : normalizedTools;
+    const agent = {
+      id,
+      name: String(name || "").trim(),
+      modelTier: String(modelTier || "Balanced (default)").trim(),
+      systemPrompt: String(systemPrompt || "").trim(),
+      tools: normalizedTools,
+      skills: normalizedSkills,
+      avatarUrl: String(avatarUrl || "").trim() || null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.agents.set(id, agent);
+    return deepClone(agent);
+  }
+
+  async listAgents(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const agents = Array.from(this.agents.values()).sort((a, b) => {
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    return agents.slice(0, safeLimit).map((agent) => deepClone(agent));
+  }
+
+  async getAgent(agentId) {
+    const agent = this.agents.get(agentId);
+    return agent ? deepClone(agent) : null;
+  }
+
+  async createDeployment({ agentId, queueName, environment, desiredReplicas, policy }) {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const deployment = {
+      id,
+      agentId,
+      queueName: String(queueName || "default").trim(),
+      environment: String(environment || "production").trim(),
+      desiredReplicas: Math.max(1, Number(desiredReplicas) || 1),
+      runningReplicas: Math.max(0, Number(desiredReplicas) || 1),
+      status: "running",
+      policy: policy && typeof policy === "object" ? deepClone(policy) : {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.deployments.set(id, deployment);
+    return deepClone(deployment);
+  }
+
+  async listDeployments(limit = 100) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    const deployments = Array.from(this.deployments.values()).sort((a, b) => {
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    return deployments.slice(0, safeLimit).map((deployment) => deepClone(deployment));
+  }
+
+  async getDeployment(deploymentId) {
+    const deployment = this.deployments.get(deploymentId);
+    return deployment ? deepClone(deployment) : null;
+  }
+
+  async updateDeploymentScale(deploymentId, desiredReplicas) {
+    const deployment = this.deployments.get(deploymentId);
+    if (!deployment) {
+      return null;
+    }
+
+    const nextReplicas = Math.max(1, Number(desiredReplicas) || 1);
+    deployment.desiredReplicas = nextReplicas;
+    deployment.runningReplicas = nextReplicas;
+    deployment.updatedAt = new Date().toISOString();
+    this.deployments.set(deploymentId, deployment);
+    return deepClone(deployment);
+  }
+}
+
+class PostgresRepository {
+  constructor(connectionString) {
+    this.pool = new Pool({
+      connectionString,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    });
+  }
+
+  type() {
+    return "postgres";
+  }
+
+  async init() {
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS ontology_fields (
+        field_key TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        aliases JSONB NOT NULL,
+        value_aliases JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS column_overrides (
+        id TEXT PRIMARY KEY,
+        company_scope TEXT NOT NULL,
+        source_column TEXT NOT NULL,
+        source_column_norm TEXT NOT NULL,
+        canonical_field TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (company_scope, source_column_norm)
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS datasets (
+        id TEXT PRIMARY KEY,
+        company_name TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        row_count INTEGER NOT NULL,
+        column_mapping JSONB NOT NULL,
+        normalized_rows JSONB NOT NULL
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS ingestion_jobs (
+        id TEXT PRIMARY KEY,
+        job_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        result JSONB,
+        error TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        model_tier TEXT NOT NULL,
+        system_prompt TEXT NOT NULL,
+        tools JSONB NOT NULL DEFAULT '[]'::jsonb,
+        skills JSONB NOT NULL DEFAULT '[]'::jsonb,
+        avatar_url TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE agents
+      ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]'::jsonb;
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE agents
+      ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS agent_deployments (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        queue_name TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        desired_replicas INTEGER NOT NULL,
+        running_replicas INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+  }
+
+  async listOntologyFields() {
+    const { rows } = await this.pool.query(
+      `
+      SELECT field_key, label, aliases, value_aliases, created_at, updated_at
+      FROM ontology_fields
+      ORDER BY field_key ASC
+      `
+    );
+
+    return rows.map((row) => ({
+      key: row.field_key,
+      label: row.label,
+      aliases: row.aliases || [],
+      valueAliases: row.value_aliases || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async upsertOntologyFields(fields) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      for (const field of fields) {
+        await client.query(
+          `
+          INSERT INTO ontology_fields (field_key, label, aliases, value_aliases, created_at, updated_at)
+          VALUES ($1, $2, $3::jsonb, $4::jsonb, NOW(), NOW())
+          ON CONFLICT (field_key)
+          DO UPDATE SET
+            label = EXCLUDED.label,
+            aliases = EXCLUDED.aliases,
+            value_aliases = EXCLUDED.value_aliases,
+            updated_at = NOW()
+          `,
+          [field.key, field.label, JSON.stringify(field.aliases || []), JSON.stringify(field.valueAliases || {})]
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listColumnOverrides() {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, company_scope, source_column, source_column_norm, canonical_field, created_at, updated_at
+      FROM column_overrides
+      ORDER BY updated_at DESC
+      `
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      companyScope: row.company_scope,
+      sourceColumn: row.source_column,
+      sourceColumnNorm: row.source_column_norm,
+      canonicalField: row.canonical_field,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async upsertColumnOverride({ companyName, sourceColumn, canonicalField }) {
+    const companyScope = normalizeScope(companyName);
+    const sourceColumnNorm = normalizeColumnName(sourceColumn);
+    const id = crypto.randomUUID();
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO column_overrides (
+        id, company_scope, source_column, source_column_norm, canonical_field, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+      ON CONFLICT (company_scope, source_column_norm)
+      DO UPDATE SET
+        source_column = EXCLUDED.source_column,
+        canonical_field = EXCLUDED.canonical_field,
+        updated_at = NOW()
+      RETURNING id, company_scope, source_column, source_column_norm, canonical_field, created_at, updated_at
+      `,
+      [id, companyScope, String(sourceColumn || "").trim(), sourceColumnNorm, canonicalField]
+    );
+
+    return {
+      id: rows[0].id,
+      companyScope: rows[0].company_scope,
+      sourceColumn: rows[0].source_column,
+      sourceColumnNorm: rows[0].source_column_norm,
+      canonicalField: rows[0].canonical_field,
+      createdAt: rows[0].created_at,
+      updatedAt: rows[0].updated_at,
+    };
+  }
+
+  async createDataset(dataset) {
+    await this.pool.query(
+      `
+      INSERT INTO datasets (id, company_name, source_name, created_at, row_count, column_mapping, normalized_rows)
+      VALUES ($1, $2, $3, $4::timestamptz, $5, $6::jsonb, $7::jsonb)
+      `,
+      [
+        dataset.id,
+        dataset.companyName,
+        dataset.sourceName,
+        dataset.createdAt,
+        dataset.rowCount,
+        JSON.stringify(dataset.columnMapping || []),
+        JSON.stringify(dataset.normalizedRows || []),
+      ]
+    );
+
+    return deepClone(dataset);
+  }
+
+  async listDatasets() {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, company_name, source_name, created_at, row_count, column_mapping
+      FROM datasets
+      ORDER BY created_at DESC
+      `
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      companyName: row.company_name,
+      sourceName: row.source_name,
+      createdAt: row.created_at,
+      rowCount: row.row_count,
+      mappedColumns: Array.isArray(row.column_mapping) ? row.column_mapping.length : 0,
+    }));
+  }
+
+  async getDataset(datasetId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, company_name, source_name, created_at, row_count, column_mapping, normalized_rows
+      FROM datasets
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [datasetId]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      companyName: row.company_name,
+      sourceName: row.source_name,
+      createdAt: row.created_at,
+      rowCount: row.row_count,
+      columnMapping: row.column_mapping || [],
+      normalizedRows: row.normalized_rows || [],
+      sampleRows: (row.normalized_rows || []).slice(0, 10),
+    };
+  }
+
+  async getDatasetsByIds(datasetIds) {
+    if (!Array.isArray(datasetIds) || datasetIds.length === 0) {
+      const { rows } = await this.pool.query(
+        `
+        SELECT id, company_name, source_name, created_at, row_count, column_mapping, normalized_rows
+        FROM datasets
+        ORDER BY created_at ASC
+        `
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        companyName: row.company_name,
+        sourceName: row.source_name,
+        createdAt: row.created_at,
+        rowCount: row.row_count,
+        columnMapping: row.column_mapping || [],
+        normalizedRows: row.normalized_rows || [],
+        sampleRows: (row.normalized_rows || []).slice(0, 10),
+      }));
+    }
+
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, company_name, source_name, created_at, row_count, column_mapping, normalized_rows
+      FROM datasets
+      WHERE id = ANY($1::text[])
+      ORDER BY created_at ASC
+      `,
+      [datasetIds]
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      companyName: row.company_name,
+      sourceName: row.source_name,
+      createdAt: row.created_at,
+      rowCount: row.row_count,
+      columnMapping: row.column_mapping || [],
+      normalizedRows: row.normalized_rows || [],
+      sampleRows: (row.normalized_rows || []).slice(0, 10),
+    }));
+  }
+
+  async enqueueJob({ jobType, payload }) {
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+
+    await this.pool.query(
+      `
+      INSERT INTO ingestion_jobs (id, job_type, status, payload, attempts, created_at)
+      VALUES ($1, $2, 'pending', $3::jsonb, 0, $4::timestamptz)
+      `,
+      [id, jobType, JSON.stringify(payload || {}), createdAt]
+    );
+
+    return {
+      id,
+      jobType,
+      status: "pending",
+      payload: deepClone(payload || {}),
+      result: null,
+      error: null,
+      attempts: 0,
+      createdAt,
+      startedAt: null,
+      completedAt: null,
+    };
+  }
+
+  async listJobs(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, job_type, status, payload, result, error, attempts, created_at, started_at, completed_at
+      FROM ingestion_jobs
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+
+    return rows.map((row) => toJobResponse(row));
+  }
+
+  async getJob(jobId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, job_type, status, payload, result, error, attempts, created_at, started_at, completed_at
+      FROM ingestion_jobs
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [jobId]
+    );
+    return rows.length > 0 ? toJobResponse(rows[0]) : null;
+  }
+
+  async claimPendingJob() {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const candidate = await client.query(
+        `
+        SELECT id
+        FROM ingestion_jobs
+        WHERE status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        `
+      );
+
+      if (candidate.rows.length === 0) {
+        await client.query("COMMIT");
+        return null;
+      }
+
+      const jobId = candidate.rows[0].id;
+      const updated = await client.query(
+        `
+        UPDATE ingestion_jobs
+        SET status = 'running', started_at = NOW(), attempts = attempts + 1, error = NULL
+        WHERE id = $1
+        RETURNING id, job_type, status, payload, result, error, attempts, created_at, started_at, completed_at
+        `,
+        [jobId]
+      );
+
+      await client.query("COMMIT");
+      return toJobResponse(updated.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeJob(jobId, result) {
+    const { rows } = await this.pool.query(
+      `
+      UPDATE ingestion_jobs
+      SET status = 'completed', result = $2::jsonb, completed_at = NOW(), error = NULL
+      WHERE id = $1
+      RETURNING id, job_type, status, payload, result, error, attempts, created_at, started_at, completed_at
+      `,
+      [jobId, JSON.stringify(result || {})]
+    );
+
+    return rows.length > 0 ? toJobResponse(rows[0]) : null;
+  }
+
+  async failJob(jobId, errorMessage) {
+    const { rows } = await this.pool.query(
+      `
+      UPDATE ingestion_jobs
+      SET status = 'failed', error = $2, completed_at = NOW()
+      WHERE id = $1
+      RETURNING id, job_type, status, payload, result, error, attempts, created_at, started_at, completed_at
+      `,
+      [jobId, String(errorMessage || "unknown_error")]
+    );
+
+    return rows.length > 0 ? toJobResponse(rows[0]) : null;
+  }
+
+  async createAgent({ name, modelTier, systemPrompt, tools, skills, avatarUrl }) {
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const normalizedTools = Array.isArray(tools)
+      ? [...new Set(tools.map((item) => String(item).trim()).filter(Boolean))]
+      : [];
+    const normalizedSkills = Array.isArray(skills)
+      ? [...new Set(skills.map((item) => String(item).trim()).filter(Boolean))]
+      : normalizedTools;
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO agents (id, name, model_tier, system_prompt, tools, skills, avatar_url, status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, 'active', $8::timestamptz, $8::timestamptz)
+      RETURNING id, name, model_tier, system_prompt, tools, skills, avatar_url, status, created_at, updated_at
+      `,
+      [
+        id,
+        String(name || "").trim(),
+        String(modelTier || "Balanced (default)").trim(),
+        String(systemPrompt || "").trim(),
+        JSON.stringify(normalizedTools),
+        JSON.stringify(normalizedSkills),
+        String(avatarUrl || "").trim() || null,
+        createdAt,
+      ]
+    );
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      modelTier: row.model_tier,
+      systemPrompt: row.system_prompt,
+      tools: row.tools || [],
+      skills: row.skills || row.tools || [],
+      avatarUrl: row.avatar_url || null,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async listAgents(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, name, model_tier, system_prompt, tools, skills, avatar_url, status, created_at, updated_at
+      FROM agents
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      modelTier: row.model_tier,
+      systemPrompt: row.system_prompt,
+      tools: row.tools || [],
+      skills: row.skills || row.tools || [],
+      avatarUrl: row.avatar_url || null,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async getAgent(agentId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, name, model_tier, system_prompt, tools, skills, avatar_url, status, created_at, updated_at
+      FROM agents
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [agentId]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      modelTier: row.model_tier,
+      systemPrompt: row.system_prompt,
+      tools: row.tools || [],
+      skills: row.skills || row.tools || [],
+      avatarUrl: row.avatar_url || null,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async createDeployment({ agentId, queueName, environment, desiredReplicas, policy }) {
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const replicas = Math.max(1, Number(desiredReplicas) || 1);
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO agent_deployments (
+        id, agent_id, queue_name, environment, desired_replicas, running_replicas, status, policy, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $5, 'running', $6::jsonb, $7::timestamptz, $7::timestamptz)
+      RETURNING id, agent_id, queue_name, environment, desired_replicas, running_replicas, status, policy, created_at, updated_at
+      `,
+      [
+        id,
+        agentId,
+        String(queueName || "default").trim(),
+        String(environment || "production").trim(),
+        replicas,
+        JSON.stringify(policy && typeof policy === "object" ? policy : {}),
+        createdAt,
+      ]
+    );
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      agentId: row.agent_id,
+      queueName: row.queue_name,
+      environment: row.environment,
+      desiredReplicas: row.desired_replicas,
+      runningReplicas: row.running_replicas,
+      status: row.status,
+      policy: row.policy || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async listDeployments(limit = 100) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, agent_id, queue_name, environment, desired_replicas, running_replicas, status, policy, created_at, updated_at
+      FROM agent_deployments
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      agentId: row.agent_id,
+      queueName: row.queue_name,
+      environment: row.environment,
+      desiredReplicas: row.desired_replicas,
+      runningReplicas: row.running_replicas,
+      status: row.status,
+      policy: row.policy || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async getDeployment(deploymentId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, agent_id, queue_name, environment, desired_replicas, running_replicas, status, policy, created_at, updated_at
+      FROM agent_deployments
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [deploymentId]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      agentId: row.agent_id,
+      queueName: row.queue_name,
+      environment: row.environment,
+      desiredReplicas: row.desired_replicas,
+      runningReplicas: row.running_replicas,
+      status: row.status,
+      policy: row.policy || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async updateDeploymentScale(deploymentId, desiredReplicas) {
+    const replicas = Math.max(1, Number(desiredReplicas) || 1);
+    const { rows } = await this.pool.query(
+      `
+      UPDATE agent_deployments
+      SET desired_replicas = $2, running_replicas = $2, updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, agent_id, queue_name, environment, desired_replicas, running_replicas, status, policy, created_at, updated_at
+      `,
+      [deploymentId, replicas]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      agentId: row.agent_id,
+      queueName: row.queue_name,
+      environment: row.environment,
+      desiredReplicas: row.desired_replicas,
+      runningReplicas: row.running_replicas,
+      status: row.status,
+      policy: row.policy || {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+}
+
+function createRepository() {
+  if (process.env.DATABASE_URL) {
+    return new PostgresRepository(process.env.DATABASE_URL);
+  }
+  return new InMemoryRepository();
+}
+
+module.exports = {
+  createRepository,
+  normalizeScope,
+  normalizeColumnName,
+};

@@ -1,0 +1,1155 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title><%= pageTitle %></title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/tailwind.css?v=<%= assetVersion %>" />
+  </head>
+  <body class="min-h-screen bg-gradient-to-br from-[#e8f7ff] via-[#f8fbff] to-[#fff3ed]">
+    <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <div class="grid gap-6 lg:grid-cols-[280px,1fr]">
+        <aside
+          class="rounded-3xl border border-white/70 bg-white/90 p-5 shadow-soft backdrop-blur lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:overflow-y-auto"
+        >
+          <div class="flex items-center gap-3">
+            <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-ink text-sm font-bold text-white">AG</div>
+            <div>
+              <p class="font-display text-sm font-semibold">Agent Workspace</p>
+              <p class="text-xs text-slate-500">Control Cockpit</p>
+            </div>
+          </div>
+
+          <nav class="mt-7" aria-label="Agent menu">
+            <p class="mb-3 px-2 text-xs uppercase tracking-[0.2em] text-slate-400">Sidebar</p>
+            <ul class="space-y-2 text-sm" id="sidebarMenu">
+              <li>
+                <button
+                  type="button"
+                  data-tab="data-processing"
+                  class="tab-btn flex w-full items-center justify-between rounded-2xl px-4 py-3 font-semibold transition"
+                >
+                  <span>데이터 처리</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">Pipeline</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  data-tab="agent-creation"
+                  class="tab-btn flex w-full items-center justify-between rounded-2xl px-4 py-3 font-semibold transition"
+                >
+                  <span>agent 생성</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">Builder</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  data-tab="agent-deployment"
+                  class="tab-btn flex w-full items-center justify-between rounded-2xl px-4 py-3 font-semibold transition"
+                >
+                  <span>agent 배치</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">Rollout</span>
+                </button>
+              </li>
+            </ul>
+          </nav>
+
+          <div class="mt-7 rounded-2xl bg-gradient-to-br from-ink to-slate-800 p-4 text-white">
+            <p class="text-xs uppercase tracking-[0.2em] text-slate-300">현재 운영 상태</p>
+            <div class="mt-3 space-y-2 text-sm">
+              <div class="flex items-center justify-between">
+                <span class="text-slate-300">활성 Agent</span>
+                <strong>12</strong>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-slate-300">대기 Job</span>
+                <strong>27</strong>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-slate-300">실패율</span>
+                <strong class="text-neon">0.9%</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <p class="text-xs text-slate-500">Signed in as</p>
+            <p class="font-semibold text-slate-900"><%= user.name %> (<%= user.role %>)</p>
+          </div>
+        </aside>
+
+        <section>
+          <main class="space-y-6">
+            <section data-panel="data-processing" class="tab-panel rounded-3xl bg-white p-6 shadow-soft">
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div>
+      <h2 class="font-display text-xl font-semibold">데이터 처리</h2>
+      <p class="mt-1 text-sm text-slate-500">
+        엑셀/CSV/JSON 테이블 업로드 → 온톨로지 매핑 → 비동기 Job 처리 상태를 관리합니다.
+      </p>
+    </div>
+    <span class="rounded-full bg-[#e8f7ff] px-3 py-1 text-xs font-semibold text-electric">실시간 모니터링</span>
+  </div>
+
+  <div class="mt-6 grid gap-4 lg:grid-cols-2">
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <h3 class="text-sm font-semibold text-slate-800">파일 업로드</h3>
+      <p class="mt-1 text-xs text-slate-500">회사명이 다르면 별도 스코프로 매핑됩니다.</p>
+      <div class="mt-3 grid gap-3">
+        <label class="block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Company Name</span>
+          <input
+            id="dpCompanyName"
+            type="text"
+            value="CompanyA"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          />
+        </label>
+        <label class="block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">File</span>
+          <input
+            id="dpFileInput"
+            type="file"
+            accept=".csv,.xls,.xlsx"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          />
+        </label>
+        <button
+          id="dpUploadBtn"
+          class="rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+        >
+          파일 업로드(Job 생성)
+        </button>
+      </div>
+    </article>
+
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <h3 class="text-sm font-semibold text-slate-800">JSON 테이블 업로드</h3>
+      <p class="mt-1 text-xs text-slate-500">배열 형태 JSON을 바로 붙여 넣어 비동기 처리합니다.</p>
+      <label class="mt-3 block text-sm">
+        <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Rows (JSON Array)</span>
+        <textarea
+          id="dpJsonInput"
+          rows="6"
+          class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs outline-none ring-electric/30 transition focus:ring"
+        >[
+  { "Name": "Alex", "Sex": "male", "Age": 31 },
+  { "Name": "Jamie", "Sex": "female", "Age": 28 }
+]</textarea>
+      </label>
+      <button
+        id="dpJsonUploadBtn"
+        class="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+      >
+        JSON 업로드(Job 생성)
+      </button>
+    </article>
+  </div>
+
+  <div id="dpNotice" class="mt-4 hidden rounded-xl border px-3 py-2 text-sm"></div>
+
+  <div class="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Jobs</p>
+      <p id="dpMetricJobsTotal" class="mt-2 font-display text-2xl font-semibold">0</p>
+      <p class="mt-1 text-sm text-slate-600">최근 조회 기준</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Pending/Running</p>
+      <p id="dpMetricJobsActive" class="mt-2 font-display text-2xl font-semibold">0</p>
+      <p class="mt-1 text-sm text-slate-600">처리 대기/진행</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Completed</p>
+      <p id="dpMetricJobsDone" class="mt-2 font-display text-2xl font-semibold">0</p>
+      <p class="mt-1 text-sm text-neon">완료</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Failed</p>
+      <p id="dpMetricJobsFailed" class="mt-2 font-display text-2xl font-semibold">0</p>
+      <p class="mt-1 text-sm text-coral">실패</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Datasets</p>
+      <p id="dpMetricDatasets" class="mt-2 font-display text-2xl font-semibold">0</p>
+      <p class="mt-1 text-sm text-slate-600">생성된 데이터셋</p>
+    </article>
+  </div>
+
+  <div class="mt-6 grid gap-6 lg:grid-cols-5">
+    <article class="lg:col-span-3">
+      <h3 class="text-sm font-semibold text-slate-800">최근 처리 Job</h3>
+      <div class="mt-3 overflow-x-auto rounded-2xl border border-slate-100">
+        <table class="min-w-full text-left text-sm">
+          <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th class="px-4 py-3">Job ID</th>
+              <th class="px-4 py-3">회사 / 소스</th>
+              <th class="px-4 py-3">상태</th>
+              <th class="px-4 py-3">행수</th>
+              <th class="px-4 py-3">Dataset ID</th>
+            </tr>
+          </thead>
+          <tbody id="dpJobsBody" class="divide-y divide-slate-100 text-slate-700">
+            <tr>
+              <td class="px-4 py-4 text-sm text-slate-500" colspan="5">아직 생성된 Job이 없습니다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="lg:col-span-2 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <h3 class="text-sm font-semibold text-slate-800">Merge & Dataset</h3>
+      <p class="mt-1 text-xs text-slate-500">콤마로 datasetId를 입력하면 해당 데이터셋만 병합합니다. 비우면 전체 병합합니다.</p>
+      <label class="mt-3 block text-sm">
+        <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Dataset IDs</span>
+        <input
+          id="dpMergeDatasetIds"
+          type="text"
+          placeholder="id1,id2,id3"
+          class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+        />
+      </label>
+      <button
+        id="dpMergeBtn"
+        class="mt-3 rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+      >
+        Merge 실행
+      </button>
+      <pre
+        id="dpMergeResult"
+        class="mt-3 hidden max-h-48 overflow-auto rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs text-slate-700"
+      ></pre>
+
+      <h4 class="mt-5 text-sm font-semibold text-slate-800">최근 데이터셋</h4>
+      <ul id="dpDatasetList" class="mt-2 space-y-2 text-sm">
+        <li class="rounded-xl border border-slate-200 bg-white p-3 text-slate-500">아직 생성된 데이터셋이 없습니다.</li>
+      </ul>
+    </article>
+  </div>
+
+  <div class="mt-6">
+    <h3 class="text-sm font-semibold text-slate-800">파이프라인 룰</h3>
+    <ul class="mt-3 grid gap-3 text-sm lg:grid-cols-3">
+      <li class="rounded-xl border border-slate-200 bg-slate-50 p-3">유효성 실패 시 최대 3회 재시도</li>
+      <li class="rounded-xl border border-slate-200 bg-slate-50 p-3">중복 이벤트는 SHA-256 키로 10분 캐시</li>
+      <li class="rounded-xl border border-slate-200 bg-slate-50 p-3">적재 지연 2초 초과 시 자동 알림 발송</li>
+    </ul>
+  </div>
+</section>
+
+
+            <section data-panel="agent-creation" class="tab-panel hidden rounded-3xl bg-white p-6 shadow-soft">
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div>
+      <h2 class="font-display text-xl font-semibold">agent 생성</h2>
+      <p class="mt-1 text-sm text-slate-500">이름, 시스템 인스트럭션, 스킬, 아바타를 설정해 에이전트를 생성합니다.</p>
+    </div>
+    <span class="rounded-full bg-[#fff1eb] px-3 py-1 text-xs font-semibold text-coral">Builder Studio</span>
+  </div>
+
+  <div id="acNotice" class="mt-4 hidden rounded-xl border px-3 py-2 text-sm"></div>
+
+  <div class="mt-6 grid gap-6 md:grid-cols-3">
+    <div class="space-y-4 md:col-span-2">
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">Agent 이름 설정</h3>
+        <label class="mt-3 block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Agent Name</span>
+          <input
+            id="acName"
+            type="text"
+            value="Growth Analyst Agent"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          />
+        </label>
+      </article>
+
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">Agent 시스템 인스트럭션</h3>
+        <label class="mt-3 block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">System Prompt</span>
+          <textarea
+            id="acPrompt"
+            rows="7"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          >You are a data-focused growth analyst. Prioritize actionable insights with measurable KPI impact.</textarea>
+        </label>
+      </article>
+
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">Agent 사용할 스킬들</h3>
+        <p class="mt-1 text-sm text-slate-500">내 스킬 목록에서 필요한 스킬을 선택합니다.</p>
+        <div id="acSkillList" class="mt-3 grid gap-2 sm:grid-cols-2">
+          <p class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500 sm:col-span-2">스킬 목록을 불러오는 중입니다...</p>
+        </div>
+      </article>
+    </div>
+
+    <div class="space-y-4 md:col-span-1">
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">avatars</h3>
+        <p class="mt-1 text-sm text-slate-500">폴더에 있는 SVG 중 랜덤으로 1개 선택</p>
+        <div class="mt-3 flex h-80 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          <img id="acAvatarImage" alt="Agent avatar" class="hidden max-h-56 w-auto object-contain" />
+          <p id="acAvatarEmpty" class="px-4 text-center text-xs text-slate-500">아바타를 불러오는 중입니다...</p>
+        </div>
+      </article>
+
+      <button
+        id="acRerollAvatarBtn"
+        class="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+      >
+        avatars 다시 뽑기
+      </button>
+      <button id="acCreateBtn" class="w-full rounded-xl bg-ink px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Agent 생성하기</button>
+    </div>
+  </div>
+
+  <article class="mt-6 rounded-2xl border border-slate-100 bg-slate-50 p-5">
+    <h3 class="font-semibold text-slate-900">최근 생성된 Agent</h3>
+    <ul id="acAgentList" class="mt-4 space-y-3 text-sm">
+      <li class="rounded-xl border border-slate-200 bg-white p-3 text-slate-500">아직 생성된 Agent가 없습니다.</li>
+    </ul>
+  </article>
+</section>
+
+
+            <section data-panel="agent-deployment" class="tab-panel hidden rounded-3xl bg-white p-6 shadow-soft">
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div>
+      <h2 class="font-display text-xl font-semibold">agent 배치</h2>
+      <p class="mt-1 text-sm text-slate-500">에이전트를 업무 큐와 환경별 슬롯에 배치하고 롤아웃 상태를 추적합니다.</p>
+    </div>
+    <span class="rounded-full bg-[#e9fff5] px-3 py-1 text-xs font-semibold text-neon">Auto Scaling ON</span>
+  </div>
+
+  <div id="adNotice" class="mt-4 hidden rounded-xl border px-3 py-2 text-sm"></div>
+
+  <div class="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">총 배치 수</p>
+      <p id="adMetricTotal" class="mt-2 font-display text-2xl font-semibold">0</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Running</p>
+      <p id="adMetricRunning" class="mt-2 font-display text-2xl font-semibold">0</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Standby</p>
+      <p id="adMetricStandby" class="mt-2 font-display text-2xl font-semibold">0</p>
+    </article>
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Failed</p>
+      <p id="adMetricFailed" class="mt-2 font-display text-2xl font-semibold">0</p>
+    </article>
+  </div>
+
+  <div class="mt-6 grid gap-6 lg:grid-cols-5">
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4 lg:col-span-3">
+      <h3 class="text-sm font-semibold text-slate-800">배치 생성</h3>
+      <div class="mt-3 grid gap-3 md:grid-cols-2">
+        <label class="block text-sm md:col-span-2">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Agent</span>
+          <select id="adAgentSelect" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring">
+            <option value="">배치할 Agent를 선택하세요</option>
+          </select>
+        </label>
+        <label class="block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Queue Name</span>
+          <input id="adQueueName" type="text" value="default" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring" />
+        </label>
+        <label class="block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Environment</span>
+          <select id="adEnvironment" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring">
+            <option value="production">production</option>
+            <option value="staging">staging</option>
+            <option value="preview">preview</option>
+          </select>
+        </label>
+        <label class="block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Desired Replicas</span>
+          <input id="adReplicas" type="number" min="1" value="1" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring" />
+        </label>
+      </div>
+      <button id="adDeployBtn" class="mt-4 rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800">배치 생성</button>
+
+      <div class="mt-5 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+        <table class="min-w-full text-left text-sm">
+          <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th class="px-3 py-2">Deployment</th>
+              <th class="px-3 py-2">Agent</th>
+              <th class="px-3 py-2">Queue/Env</th>
+              <th class="px-3 py-2">상태</th>
+              <th class="px-3 py-2">Scale</th>
+            </tr>
+          </thead>
+          <tbody id="adDeploymentBody" class="divide-y divide-slate-100 text-slate-700">
+            <tr>
+              <td class="px-3 py-3 text-sm text-slate-500" colspan="5">아직 생성된 배치가 없습니다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4 lg:col-span-2">
+      <h3 class="text-sm font-semibold text-slate-800">배치 정책</h3>
+      <ul class="mt-3 space-y-3 text-sm">
+        <li class="rounded-xl border border-slate-200 bg-white p-3">CPU 70% 초과 시 동일 역할 Agent 2개 자동 확장</li>
+        <li class="rounded-xl border border-slate-200 bg-white p-3">5xx 비율 2% 초과 시 이전 버전으로 롤백</li>
+        <li class="rounded-xl border border-slate-200 bg-white p-3">업무 우선순위 P0/P1는 전용 슬롯 고정</li>
+      </ul>
+    </article>
+  </div>
+</section>
+
+          </main>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const buttons = Array.from(document.querySelectorAll('.tab-btn'));
+        const panels = Array.from(document.querySelectorAll('.tab-panel'));
+        const inactiveClasses = ['text-slate-700', 'hover:bg-slate-100', 'hover:text-slate-900'];
+
+        function setTab(nextTab, pushHash = true) {
+          buttons.forEach((button) => {
+            const isActive = button.dataset.tab === nextTab;
+            button.classList.toggle('bg-ink', isActive);
+            button.classList.toggle('text-white', isActive);
+            button.classList.toggle('shadow-soft', isActive);
+            button.classList.toggle('text-slate-700', !isActive);
+            button.classList.toggle('hover:bg-slate-100', !isActive);
+            button.classList.toggle('hover:text-slate-900', !isActive);
+            button.setAttribute('aria-current', isActive ? 'page' : 'false');
+          });
+
+          panels.forEach((panel) => {
+            const isActive = panel.dataset.panel === nextTab;
+            panel.classList.toggle('hidden', !isActive);
+          });
+
+          if (pushHash) {
+            window.history.replaceState(null, '', `#${nextTab}`);
+          }
+        }
+
+        buttons.forEach((button) => {
+          inactiveClasses.forEach((name) => button.classList.add(name));
+          button.addEventListener('click', () => setTab(button.dataset.tab));
+        });
+
+        const initialHash = window.location.hash.replace('#', '');
+        const initialTab = buttons.some((button) => button.dataset.tab === initialHash)
+          ? initialHash
+          : 'data-processing';
+
+        setTab(initialTab, false);
+
+        function escapeHtml(value) {
+          return String(value)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+        }
+
+        function formatTime(iso) {
+          if (!iso) {
+            return '-';
+          }
+          const date = new Date(iso);
+          if (Number.isNaN(date.getTime())) {
+            return '-';
+          }
+          return date.toLocaleTimeString('ko-KR', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          });
+        }
+
+        async function requestJson(url, options = {}) {
+          const response = await fetch(url, options);
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            data = {};
+          }
+
+          if (!response.ok) {
+            const message = data.message || data.error || `request failed: ${response.status}`;
+            throw new Error(message);
+          }
+
+          return data;
+        }
+
+        function setNotice(el, message, type = 'info') {
+          if (!el) {
+            return;
+          }
+          const styles = {
+            info: 'border-sky-200 bg-sky-50 text-sky-800',
+            success: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+            error: 'border-rose-200 bg-rose-50 text-rose-800',
+          };
+          el.className = `mt-4 rounded-xl border px-3 py-2 text-sm ${styles[type] || styles.info}`;
+          el.textContent = message;
+          el.classList.remove('hidden');
+        }
+
+        function parseCsvLine(value) {
+          return String(value || '')
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter(Boolean);
+        }
+
+        const state = {
+          agents: [],
+          deployments: [],
+          skills: [],
+          selectedAvatar: null,
+        };
+
+        const dp = {
+          companyName: document.getElementById('dpCompanyName'),
+          fileInput: document.getElementById('dpFileInput'),
+          uploadBtn: document.getElementById('dpUploadBtn'),
+          jsonInput: document.getElementById('dpJsonInput'),
+          jsonUploadBtn: document.getElementById('dpJsonUploadBtn'),
+          notice: document.getElementById('dpNotice'),
+          jobsBody: document.getElementById('dpJobsBody'),
+          metricJobsTotal: document.getElementById('dpMetricJobsTotal'),
+          metricJobsActive: document.getElementById('dpMetricJobsActive'),
+          metricJobsDone: document.getElementById('dpMetricJobsDone'),
+          metricJobsFailed: document.getElementById('dpMetricJobsFailed'),
+          metricDatasets: document.getElementById('dpMetricDatasets'),
+          datasetList: document.getElementById('dpDatasetList'),
+          mergeInput: document.getElementById('dpMergeDatasetIds'),
+          mergeBtn: document.getElementById('dpMergeBtn'),
+          mergeResult: document.getElementById('dpMergeResult'),
+        };
+
+        const ac = {
+          notice: document.getElementById('acNotice'),
+          name: document.getElementById('acName'),
+          prompt: document.getElementById('acPrompt'),
+          skillList: document.getElementById('acSkillList'),
+          avatarImage: document.getElementById('acAvatarImage'),
+          avatarEmpty: document.getElementById('acAvatarEmpty'),
+          rerollAvatarBtn: document.getElementById('acRerollAvatarBtn'),
+          createBtn: document.getElementById('acCreateBtn'),
+          list: document.getElementById('acAgentList'),
+        };
+
+        const ad = {
+          notice: document.getElementById('adNotice'),
+          metricTotal: document.getElementById('adMetricTotal'),
+          metricRunning: document.getElementById('adMetricRunning'),
+          metricStandby: document.getElementById('adMetricStandby'),
+          metricFailed: document.getElementById('adMetricFailed'),
+          agentSelect: document.getElementById('adAgentSelect'),
+          queueName: document.getElementById('adQueueName'),
+          environment: document.getElementById('adEnvironment'),
+          replicas: document.getElementById('adReplicas'),
+          deployBtn: document.getElementById('adDeployBtn'),
+          body: document.getElementById('adDeploymentBody'),
+        };
+
+        let refreshingData = false;
+        let refreshingAgents = false;
+        let refreshingDeployments = false;
+        let pollTimer = null;
+
+        function getStatusBadge(status) {
+          const map = {
+            pending: {
+              label: '대기',
+              className: 'bg-sky-100 text-sky-700',
+            },
+            running: {
+              label: '실행중',
+              className: 'bg-amber-100 text-amber-700',
+            },
+            completed: {
+              label: '완료',
+              className: 'bg-emerald-100 text-emerald-700',
+            },
+            failed: {
+              label: '실패',
+              className: 'bg-rose-100 text-rose-700',
+            },
+            standby: {
+              label: '대기',
+              className: 'bg-slate-100 text-slate-700',
+            },
+          };
+          return (
+            map[status] || {
+              label: status || 'unknown',
+              className: 'bg-slate-100 text-slate-700',
+            }
+          );
+        }
+
+        function setActionButtonsDisabled(isLoading) {
+          [dp.uploadBtn, dp.jsonUploadBtn, dp.mergeBtn, ac.rerollAvatarBtn, ac.createBtn, ad.deployBtn].forEach((button) => {
+            if (!button) {
+              return;
+            }
+            button.disabled = isLoading;
+            button.classList.toggle('opacity-60', isLoading);
+          });
+        }
+
+        function getSelectedSkills() {
+          return Array.from(ac.skillList?.querySelectorAll('input[data-skill]:checked') || [])
+            .map((input) => input.dataset.skill)
+            .filter(Boolean);
+        }
+
+        function renderSkillCatalog(skills) {
+          if (!ac.skillList) {
+            return;
+          }
+
+          if (!Array.isArray(skills) || skills.length === 0) {
+            ac.skillList.innerHTML =
+              '<p class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500 sm:col-span-2">표시할 스킬이 없습니다.</p>';
+            return;
+          }
+
+          const selected = new Set(getSelectedSkills());
+          ac.skillList.innerHTML = skills
+            .map((skill) => {
+              const id = String(skill.id || '').trim();
+              const label = String(skill.label || id || '').trim();
+              const checked = selected.has(id) ? 'checked' : '';
+
+              return `
+                <label class="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <input data-skill="${escapeHtml(id)}" type="checkbox" ${checked} class="h-4 w-4 rounded border-slate-300 text-electric focus:ring-electric" />
+                  <span class="truncate">${escapeHtml(label || id)}</span>
+                </label>
+              `;
+            })
+            .join('');
+        }
+
+        function renderSelectedAvatar(avatar) {
+          state.selectedAvatar = avatar && avatar.url ? avatar : null;
+          if (!ac.avatarImage || !ac.avatarEmpty) {
+            return;
+          }
+
+          if (!state.selectedAvatar) {
+            ac.avatarImage.removeAttribute('src');
+            ac.avatarImage.classList.add('hidden');
+            ac.avatarEmpty.classList.remove('hidden');
+            ac.avatarEmpty.textContent = '사용 가능한 아바타가 없습니다.';
+            return;
+          }
+
+          ac.avatarImage.src = state.selectedAvatar.url;
+          ac.avatarImage.classList.remove('hidden');
+          ac.avatarEmpty.classList.add('hidden');
+        }
+
+        function renderJobs(jobs) {
+          if (!Array.isArray(jobs) || jobs.length === 0) {
+            dp.jobsBody.innerHTML =
+              '<tr><td class="px-4 py-4 text-sm text-slate-500" colspan="5">아직 생성된 Job이 없습니다.</td></tr>';
+            return;
+          }
+
+          dp.jobsBody.innerHTML = jobs
+            .map((job) => {
+              const badge = getStatusBadge(job.status);
+              const rowCount = job?.payload?.rowCount ?? '-';
+              const datasetId = job?.result?.datasetId || '-';
+              const company = job?.payload?.companyName || '-';
+              const sourceName = job?.payload?.sourceName || '-';
+
+              return `
+                <tr>
+                  <td class="px-4 py-3 font-semibold text-slate-900">${escapeHtml(job.id.slice(0, 8))}</td>
+                  <td class="px-4 py-3">
+                    <p class="font-medium text-slate-900">${escapeHtml(company)}</p>
+                    <p class="text-xs text-slate-500">${escapeHtml(sourceName)}</p>
+                  </td>
+                  <td class="px-4 py-3">
+                    <span class="rounded-full px-2 py-1 text-xs ${badge.className}">${badge.label}</span>
+                  </td>
+                  <td class="px-4 py-3">${escapeHtml(String(rowCount))}</td>
+                  <td class="px-4 py-3 text-xs text-slate-600">
+                    <p class="font-mono">${escapeHtml(datasetId === '-' ? '-' : datasetId.slice(0, 12))}</p>
+                    <p class="mt-1 text-slate-400">${escapeHtml(formatTime(job.completedAt || job.startedAt || job.createdAt))}</p>
+                  </td>
+                </tr>
+              `;
+            })
+            .join('');
+        }
+
+        function renderDatasets(datasets) {
+          if (!Array.isArray(datasets) || datasets.length === 0) {
+            dp.datasetList.innerHTML =
+              '<li class="rounded-xl border border-slate-200 bg-white p-3 text-slate-500">아직 생성된 데이터셋이 없습니다.</li>';
+            return;
+          }
+
+          dp.datasetList.innerHTML = datasets
+            .slice(0, 5)
+            .map((dataset) => {
+              const mappedColumns = dataset.mappedColumns ?? '-';
+              return `
+                <li class="rounded-xl border border-slate-200 bg-white p-3">
+                  <p class="font-mono text-xs text-slate-700">${escapeHtml(dataset.id.slice(0, 12))}</p>
+                  <p class="mt-1 text-sm font-semibold text-slate-900">${escapeHtml(dataset.companyName || '-')}</p>
+                  <p class="mt-1 text-xs text-slate-500">rows: ${escapeHtml(String(dataset.rowCount || 0))} · mapped: ${escapeHtml(
+                String(mappedColumns)
+              )}</p>
+                </li>
+              `;
+            })
+            .join('');
+        }
+
+        function renderDataMetrics(jobs, datasets) {
+          const total = jobs.length;
+          const active = jobs.filter((job) => job.status === 'pending' || job.status === 'running').length;
+          const done = jobs.filter((job) => job.status === 'completed').length;
+          const failed = jobs.filter((job) => job.status === 'failed').length;
+
+          dp.metricJobsTotal.textContent = String(total);
+          dp.metricJobsActive.textContent = String(active);
+          dp.metricJobsDone.textContent = String(done);
+          dp.metricJobsFailed.textContent = String(failed);
+          dp.metricDatasets.textContent = String(datasets.length);
+        }
+
+        function renderAgents(agents) {
+          if (!Array.isArray(agents) || agents.length === 0) {
+            ac.list.innerHTML =
+              '<li class="rounded-xl border border-slate-200 bg-white p-3 text-slate-500">아직 생성된 Agent가 없습니다.</li>';
+            return;
+          }
+
+          ac.list.innerHTML = agents
+            .slice(0, 6)
+            .map((agent) => {
+              const skills = Array.isArray(agent.skills) && agent.skills.length > 0 ? agent.skills.join(', ') : 'none';
+              const avatar = agent.avatarUrl
+                ? `<img src="${escapeHtml(agent.avatarUrl)}" alt="${escapeHtml(agent.name)} avatar" class="h-10 w-10 rounded-xl border border-slate-200 bg-white object-cover" />`
+                : '<span class="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-xs text-slate-400">N/A</span>';
+              return `
+                <li class="rounded-xl border border-slate-200 bg-white p-3">
+                  <div class="flex items-start gap-3">
+                    ${avatar}
+                    <div class="min-w-0">
+                      <p class="font-semibold text-slate-900">${escapeHtml(agent.name)}</p>
+                      <p class="mt-1 truncate text-xs text-slate-500">model: ${escapeHtml(agent.modelTier)}</p>
+                      <p class="mt-1 truncate text-xs text-slate-500">skills: ${escapeHtml(skills)}</p>
+                    </div>
+                  </div>
+                </li>
+              `;
+            })
+            .join('');
+        }
+
+        function renderAgentSelect(agents) {
+          const previous = ad.agentSelect.value;
+          const options = ['<option value="">배치할 Agent를 선택하세요</option>'];
+
+          for (const agent of agents) {
+            options.push(`<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)} (${escapeHtml(agent.modelTier)})</option>`);
+          }
+
+          ad.agentSelect.innerHTML = options.join('');
+          if (previous && agents.some((agent) => agent.id === previous)) {
+            ad.agentSelect.value = previous;
+          }
+        }
+
+        function renderDeployments(deployments) {
+          if (!Array.isArray(deployments) || deployments.length === 0) {
+            ad.body.innerHTML =
+              '<tr><td class="px-3 py-3 text-sm text-slate-500" colspan="5">아직 생성된 배치가 없습니다.</td></tr>';
+            return;
+          }
+
+          ad.body.innerHTML = deployments
+            .slice(0, 20)
+            .map((deployment) => {
+              const badge = getStatusBadge(deployment.status);
+              return `
+                <tr>
+                  <td class="px-3 py-3">
+                    <p class="font-mono text-xs text-slate-700">${escapeHtml(deployment.id.slice(0, 10))}</p>
+                    <p class="mt-1 text-xs text-slate-400">${escapeHtml(formatTime(deployment.createdAt))}</p>
+                  </td>
+                  <td class="px-3 py-3">
+                    <p class="font-semibold text-slate-900">${escapeHtml(deployment.agentName || deployment.agentId)}</p>
+                    <p class="text-xs text-slate-500">${escapeHtml(deployment.agentId.slice(0, 10))}</p>
+                  </td>
+                  <td class="px-3 py-3 text-xs text-slate-600">
+                    <p>${escapeHtml(deployment.queueName)}</p>
+                    <p class="mt-1">${escapeHtml(deployment.environment)}</p>
+                  </td>
+                  <td class="px-3 py-3">
+                    <span class="rounded-full px-2 py-1 text-xs ${badge.className}">${badge.label}</span>
+                    <p class="mt-1 text-xs text-slate-500">${escapeHtml(String(deployment.runningReplicas))}/${escapeHtml(
+                String(deployment.desiredReplicas)
+              )}</p>
+                  </td>
+                  <td class="px-3 py-3">
+                    <div class="flex items-center gap-2">
+                      <input data-scale-id="${escapeHtml(deployment.id)}" type="number" min="1" value="${escapeHtml(
+                String(deployment.desiredReplicas)
+              )}" class="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs" />
+                      <button data-scale-btn="${escapeHtml(
+                        deployment.id
+                      )}" class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">적용</button>
+                    </div>
+                  </td>
+                </tr>
+              `;
+            })
+            .join('');
+        }
+
+        function renderDeploymentMetrics(deployments) {
+          const total = deployments.length;
+          const running = deployments.filter((deployment) => deployment.status === 'running').length;
+          const standby = deployments.filter((deployment) => deployment.status === 'standby').length;
+          const failed = deployments.filter((deployment) => deployment.status === 'failed').length;
+
+          ad.metricTotal.textContent = String(total);
+          ad.metricRunning.textContent = String(running);
+          ad.metricStandby.textContent = String(standby);
+          ad.metricFailed.textContent = String(failed);
+        }
+
+        async function refreshDataProcessing() {
+          if (refreshingData) {
+            return;
+          }
+          refreshingData = true;
+          try {
+            const [jobResp, datasetResp] = await Promise.all([
+              requestJson('/api/jobs?limit=40'),
+              requestJson('/api/data/datasets'),
+            ]);
+
+            const jobs = Array.isArray(jobResp.jobs) ? jobResp.jobs : [];
+            const datasets = Array.isArray(datasetResp.datasets) ? datasetResp.datasets : [];
+
+            renderJobs(jobs);
+            renderDatasets(datasets);
+            renderDataMetrics(jobs, datasets);
+          } catch (error) {
+            setNotice(dp.notice, `조회 실패: ${error.message}`, 'error');
+          } finally {
+            refreshingData = false;
+          }
+        }
+
+        async function refreshAgents() {
+          if (refreshingAgents) {
+            return;
+          }
+          refreshingAgents = true;
+          try {
+            const response = await requestJson('/api/agents?limit=60');
+            state.agents = Array.isArray(response.agents) ? response.agents : [];
+            renderAgents(state.agents);
+            renderAgentSelect(state.agents);
+          } catch (error) {
+            setNotice(ac.notice, `Agent 조회 실패: ${error.message}`, 'error');
+          } finally {
+            refreshingAgents = false;
+          }
+        }
+
+        async function refreshSkills() {
+          try {
+            const response = await requestJson('/api/skills');
+            state.skills = Array.isArray(response.skills) ? response.skills : [];
+            renderSkillCatalog(state.skills);
+          } catch (error) {
+            renderSkillCatalog([]);
+            setNotice(ac.notice, `스킬 목록 조회 실패: ${error.message}`, 'error');
+          }
+        }
+
+        async function drawRandomAvatar() {
+          try {
+            const response = await requestJson('/api/avatars/random');
+            renderSelectedAvatar(response.avatar || null);
+          } catch (error) {
+            renderSelectedAvatar(null);
+            setNotice(ac.notice, `아바타 로드 실패: ${error.message}`, 'error');
+          }
+        }
+
+        async function refreshDeployments() {
+          if (refreshingDeployments) {
+            return;
+          }
+          refreshingDeployments = true;
+          try {
+            const response = await requestJson('/api/deployments?limit=100');
+            state.deployments = Array.isArray(response.deployments) ? response.deployments : [];
+            renderDeployments(state.deployments);
+            renderDeploymentMetrics(state.deployments);
+          } catch (error) {
+            setNotice(ad.notice, `배치 조회 실패: ${error.message}`, 'error');
+          } finally {
+            refreshingDeployments = false;
+          }
+        }
+
+        async function uploadFile() {
+          const companyName = dp.companyName.value.trim() || 'Unknown Company';
+          const file = dp.fileInput.files?.[0];
+
+          if (!file) {
+            setNotice(dp.notice, '업로드할 파일을 선택하세요.', 'error');
+            return;
+          }
+
+          const formData = new FormData();
+          formData.set('companyName', companyName);
+          formData.set('file', file);
+
+          setActionButtonsDisabled(true);
+          try {
+            const result = await requestJson('/api/data/upload', {
+              method: 'POST',
+              body: formData,
+            });
+
+            setNotice(dp.notice, `Job 생성 완료: ${result.job.id}`, 'success');
+            dp.fileInput.value = '';
+            await refreshDataProcessing();
+          } catch (error) {
+            setNotice(dp.notice, `파일 업로드 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
+        async function uploadJsonTable() {
+          const companyName = dp.companyName.value.trim() || 'Unknown Company';
+          let table;
+          try {
+            table = JSON.parse(dp.jsonInput.value);
+          } catch {
+            setNotice(dp.notice, 'JSON 파싱에 실패했습니다. 배열 형태인지 확인하세요.', 'error');
+            return;
+          }
+
+          if (!Array.isArray(table) || table.length === 0) {
+            setNotice(dp.notice, 'JSON 테이블은 비어있지 않은 배열이어야 합니다.', 'error');
+            return;
+          }
+
+          setActionButtonsDisabled(true);
+          try {
+            const result = await requestJson('/api/data/table', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                companyName,
+                sourceName: `json-${Date.now()}`,
+                table,
+              }),
+            });
+
+            setNotice(dp.notice, `JSON Job 생성 완료: ${result.job.id}`, 'success');
+            await refreshDataProcessing();
+          } catch (error) {
+            setNotice(dp.notice, `JSON 업로드 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
+        async function runMerge() {
+          const datasetIds = parseCsvLine(dp.mergeInput.value);
+
+          setActionButtonsDisabled(true);
+          try {
+            const result = await requestJson('/api/data/merge', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                datasetIds: datasetIds.length > 0 ? datasetIds : undefined,
+                limit: 100,
+              }),
+            });
+
+            const summary = {
+              totalRows: result?.merged?.totalRows || 0,
+              returnedRows: result?.merged?.returnedRows || 0,
+              columns: result?.merged?.columns || [],
+              sampleRows: (result?.merged?.rows || []).slice(0, 5),
+            };
+
+            dp.mergeResult.textContent = JSON.stringify(summary, null, 2);
+            dp.mergeResult.classList.remove('hidden');
+            setNotice(dp.notice, `Merge 완료: ${summary.totalRows} rows`, 'success');
+          } catch (error) {
+            setNotice(dp.notice, `Merge 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
+        async function createAgent() {
+          const name = ac.name.value.trim();
+          const modelTier = 'Balanced (default)';
+          const systemPrompt = ac.prompt.value.trim();
+          const skills = getSelectedSkills();
+          const avatarUrl = state.selectedAvatar?.url || null;
+
+          if (!name) {
+            setNotice(ac.notice, 'Agent 이름을 입력하세요.', 'error');
+            return;
+          }
+
+          if (!systemPrompt) {
+            setNotice(ac.notice, 'System Prompt를 입력하세요.', 'error');
+            return;
+          }
+
+          setActionButtonsDisabled(true);
+          try {
+            const result = await requestJson('/api/agents', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                name,
+                modelTier,
+                systemPrompt,
+                skills,
+                avatarUrl,
+              }),
+            });
+
+            setNotice(ac.notice, `Agent 생성 완료: ${result.agent.name}`, 'success');
+            await refreshAgents();
+          } catch (error) {
+            setNotice(ac.notice, `Agent 생성 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
+        async function createDeployment() {
+          const agentId = ad.agentSelect.value;
+          const queueName = ad.queueName.value.trim() || 'default';
+          const environment = ad.environment.value;
+          const desiredReplicas = Number(ad.replicas.value) || 1;
+
+          if (!agentId) {
+            setNotice(ad.notice, '배치할 Agent를 선택하세요.', 'error');
+            return;
+          }
+
+          setActionButtonsDisabled(true);
+          try {
+            const result = await requestJson('/api/deployments', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                agentId,
+                queueName,
+                environment,
+                desiredReplicas,
+              }),
+            });
+
+            setNotice(ad.notice, `배치 생성 완료: ${result.deployment.id.slice(0, 10)}`, 'success');
+            await refreshDeployments();
+          } catch (error) {
+            setNotice(ad.notice, `배치 생성 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
+        async function scaleDeployment(deploymentId, nextReplicas) {
+          setActionButtonsDisabled(true);
+          try {
+            await requestJson(`/api/deployments/${deploymentId}/scale`, {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ desiredReplicas: nextReplicas }),
+            });
+
+            setNotice(ad.notice, `배치 스케일 변경 완료: ${deploymentId.slice(0, 10)} -> ${nextReplicas}`, 'success');
+            await refreshDeployments();
+          } catch (error) {
+            setNotice(ad.notice, `스케일 변경 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
+        dp.uploadBtn?.addEventListener('click', uploadFile);
+        dp.jsonUploadBtn?.addEventListener('click', uploadJsonTable);
+        dp.mergeBtn?.addEventListener('click', runMerge);
+        ac.rerollAvatarBtn?.addEventListener('click', drawRandomAvatar);
+        ac.createBtn?.addEventListener('click', createAgent);
+        ad.deployBtn?.addEventListener('click', createDeployment);
+
+        ad.body?.addEventListener('click', (event) => {
+          const button = event.target.closest('[data-scale-btn]');
+          if (!button) {
+            return;
+          }
+
+          const deploymentId = button.getAttribute('data-scale-btn');
+          const input = ad.body.querySelector(`input[data-scale-id="${deploymentId}"]`);
+          const nextReplicas = Number(input?.value || '1') || 1;
+          scaleDeployment(deploymentId, Math.max(1, nextReplicas));
+        });
+
+        Promise.all([refreshDataProcessing(), refreshAgents(), refreshDeployments(), refreshSkills(), drawRandomAvatar()]).catch((error) => {
+          console.error('initial refresh failed', error);
+        });
+
+        pollTimer = setInterval(() => {
+          Promise.all([refreshDataProcessing(), refreshAgents(), refreshDeployments()]).catch(() => {});
+        }, 2500);
+
+        window.addEventListener('beforeunload', () => {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+          }
+        });
+      })();
+
+    </script>
+  </body>
+</html>
