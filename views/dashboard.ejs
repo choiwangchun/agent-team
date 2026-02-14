@@ -287,7 +287,16 @@
       </article>
 
       <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
-        <h3 class="font-semibold text-slate-900">Agent 사용할 스킬들</h3>
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="font-semibold text-slate-900">Agent 사용할 스킬들</h3>
+          <button
+            id="acClearSkillsBtn"
+            type="button"
+            class="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            스킬 전체 해제
+          </button>
+        </div>
         <p class="mt-1 text-sm text-slate-500">내 스킬 목록에서 필요한 스킬을 선택합니다.</p>
         <div id="acSkillList" class="mt-3 grid gap-2 sm:grid-cols-2">
           <p class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500 sm:col-span-2">스킬 목록을 불러오는 중입니다...</p>
@@ -328,87 +337,103 @@
   <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
     <div>
       <h2 class="font-display text-xl font-semibold">agent 배치</h2>
-      <p class="mt-1 text-sm text-slate-500">에이전트를 업무 큐와 환경별 슬롯에 배치하고 롤아웃 상태를 추적합니다.</p>
+      <p class="mt-1 text-sm text-slate-500">생성된 Agent를 우측 목록에서 드래그해 캔버스에 배치하고, node-to-node로 연결합니다.</p>
     </div>
-    <span class="rounded-full bg-[#e9fff5] px-3 py-1 text-xs font-semibold text-neon">Auto Scaling ON</span>
+    <span class="rounded-full bg-[#e9fff5] px-3 py-1 text-xs font-semibold text-neon">Node Flow Studio</span>
   </div>
 
   <div id="adNotice" class="mt-4 hidden rounded-xl border px-3 py-2 text-sm"></div>
 
-  <div class="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">총 배치 수</p>
-      <p id="adMetricTotal" class="mt-2 font-display text-2xl font-semibold">0</p>
-    </article>
-    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Running</p>
-      <p id="adMetricRunning" class="mt-2 font-display text-2xl font-semibold">0</p>
-    </article>
-    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Standby</p>
-      <p id="adMetricStandby" class="mt-2 font-display text-2xl font-semibold">0</p>
-    </article>
-    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-      <p class="text-xs uppercase tracking-[0.18em] text-slate-500">Failed</p>
-      <p id="adMetricFailed" class="mt-2 font-display text-2xl font-semibold">0</p>
-    </article>
-  </div>
+  <div class="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
+    <div class="space-y-4">
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">Agent를 node to node로 연결 할 수 있게 만드는 패널</h3>
+        <p class="mt-1 text-sm text-slate-500">우측의 생성된 Agent 카드를 드래그해 캔버스에 놓으세요.</p>
 
-  <div class="mt-6 grid gap-6 lg:grid-cols-5">
-    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4 lg:col-span-3">
-      <h3 class="text-sm font-semibold text-slate-800">배치 생성</h3>
-      <div class="mt-3 grid gap-3 md:grid-cols-2">
-        <label class="block text-sm md:col-span-2">
-          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Agent</span>
-          <select id="adAgentSelect" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring">
-            <option value="">배치할 Agent를 선택하세요</option>
-          </select>
-        </label>
-        <label class="block text-sm">
-          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Queue Name</span>
-          <input id="adQueueName" type="text" value="default" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring" />
-        </label>
-        <label class="block text-sm">
-          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Environment</span>
-          <select id="adEnvironment" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring">
-            <option value="production">production</option>
-            <option value="staging">staging</option>
-            <option value="preview">preview</option>
-          </select>
-        </label>
-        <label class="block text-sm">
-          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Desired Replicas</span>
-          <input id="adReplicas" type="number" min="1" value="1" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring" />
-        </label>
-      </div>
-      <button id="adDeployBtn" class="mt-4 rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800">배치 생성</button>
+        <div
+          id="adCanvas"
+          class="relative mt-4 h-[420px] overflow-hidden rounded-2xl border border-slate-200 bg-white ring-electric/30 transition"
+        >
+          <div id="adStage" class="absolute left-0 top-0 origin-top-left">
+            <svg id="adEdgeLayer" class="pointer-events-none absolute inset-0 h-full w-full"></svg>
+            <div id="adNodeLayer" class="absolute inset-0"></div>
+          </div>
+          <p id="adCanvasEmpty" class="absolute inset-0 flex items-center justify-center px-4 text-center text-base font-semibold text-slate-400">
+            드래그 앤 드롭으로 가져다 놓을 수 있음
+          </p>
+        </div>
 
-      <div class="mt-5 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
-        <table class="min-w-full text-left text-sm">
-          <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th class="px-3 py-2">Deployment</th>
-              <th class="px-3 py-2">Agent</th>
-              <th class="px-3 py-2">Queue/Env</th>
-              <th class="px-3 py-2">상태</th>
-              <th class="px-3 py-2">Scale</th>
-            </tr>
-          </thead>
-          <tbody id="adDeploymentBody" class="divide-y divide-slate-100 text-slate-700">
-            <tr>
-              <td class="px-3 py-3 text-sm text-slate-500" colspan="5">아직 생성된 배치가 없습니다.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </article>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            id="adConnectModeBtn"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            연결 모드 OFF
+          </button>
+          <button
+            id="adClearCanvasBtn"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            캔버스 초기화
+          </button>
+          <button
+            id="adZoomOutBtn"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            줌 아웃
+          </button>
+          <button
+            id="adZoomInBtn"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            줌 인
+          </button>
+          <button
+            id="adZoomResetBtn"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            줌 초기화
+          </button>
+          <span id="adZoomLabel" class="rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">100%</span>
+        </div>
 
-    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4 lg:col-span-2">
-      <h3 class="text-sm font-semibold text-slate-800">배치 정책</h3>
-      <ul class="mt-3 space-y-3 text-sm">
-        <li class="rounded-xl border border-slate-200 bg-white p-3">CPU 70% 초과 시 동일 역할 Agent 2개 자동 확장</li>
-        <li class="rounded-xl border border-slate-200 bg-white p-3">5xx 비율 2% 초과 시 이전 버전으로 롤백</li>
-        <li class="rounded-xl border border-slate-200 bg-white p-3">업무 우선순위 P0/P1는 전용 슬롯 고정</li>
+        <div class="mt-3 rounded-xl border border-slate-200 bg-white p-3">
+          <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">연결된 라인</h4>
+          <ul id="adEdgeList" class="mt-2 space-y-2 text-sm">
+            <li class="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1 text-slate-500">아직 연결된 노드가 없습니다.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">명령창</h3>
+        <p class="mt-1 text-sm text-slate-500">명령을 입력하면 agent 실행 로그처럼 콘솔 형태로 출력됩니다.</p>
+        <pre
+          id="adCommandLog"
+          class="mt-3 h-44 overflow-auto rounded-xl border border-slate-200 bg-[#0b1221] p-3 font-mono text-xs text-[#d9e5ff]"
+        >[system] help, list nodes, list edges, connect node-1 node-2, clear</pre>
+        <form id="adCommandForm" class="mt-3 flex gap-2">
+          <input
+            id="adCommandInput"
+            type="text"
+            placeholder="예: list nodes"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          />
+          <button
+            type="submit"
+            class="rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            실행
+          </button>
+        </form>
+      </article>
+    </div>
+
+    <article class="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+      <h3 class="font-semibold text-slate-900">생성된 Agent</h3>
+      <p class="mt-1 text-xs text-slate-500">캔버스로 드래그해 배치</p>
+      <ul id="adAgentSourceList" class="mt-3 space-y-2">
+        <li class="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-500">아직 생성된 Agent가 없습니다.</li>
       </ul>
     </article>
   </div>
@@ -522,11 +547,27 @@
             .filter(Boolean);
         }
 
+        function truncateForDisplay(value, maxLength = 96) {
+          const text = String(value || '');
+          if (text.length <= maxLength) {
+            return text;
+          }
+          return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+        }
+
         const state = {
           agents: [],
-          deployments: [],
           skills: [],
           selectedAvatar: null,
+          deploymentStudio: {
+            nodes: [],
+            edges: [],
+            logs: ['[system] help, list nodes, list edges, connect node-1 node-2, clear'],
+            connectMode: false,
+            pendingFromNodeId: null,
+            nextNodeSeq: 1,
+            zoom: 1,
+          },
         };
 
         const dp = {
@@ -553,6 +594,7 @@
           name: document.getElementById('acName'),
           prompt: document.getElementById('acPrompt'),
           skillList: document.getElementById('acSkillList'),
+          clearSkillsBtn: document.getElementById('acClearSkillsBtn'),
           avatarImage: document.getElementById('acAvatarImage'),
           avatarEmpty: document.getElementById('acAvatarEmpty'),
           rerollAvatarBtn: document.getElementById('acRerollAvatarBtn'),
@@ -562,21 +604,26 @@
 
         const ad = {
           notice: document.getElementById('adNotice'),
-          metricTotal: document.getElementById('adMetricTotal'),
-          metricRunning: document.getElementById('adMetricRunning'),
-          metricStandby: document.getElementById('adMetricStandby'),
-          metricFailed: document.getElementById('adMetricFailed'),
-          agentSelect: document.getElementById('adAgentSelect'),
-          queueName: document.getElementById('adQueueName'),
-          environment: document.getElementById('adEnvironment'),
-          replicas: document.getElementById('adReplicas'),
-          deployBtn: document.getElementById('adDeployBtn'),
-          body: document.getElementById('adDeploymentBody'),
+          canvas: document.getElementById('adCanvas'),
+          stage: document.getElementById('adStage'),
+          edgeLayer: document.getElementById('adEdgeLayer'),
+          nodeLayer: document.getElementById('adNodeLayer'),
+          canvasEmpty: document.getElementById('adCanvasEmpty'),
+          connectModeBtn: document.getElementById('adConnectModeBtn'),
+          clearCanvasBtn: document.getElementById('adClearCanvasBtn'),
+          zoomOutBtn: document.getElementById('adZoomOutBtn'),
+          zoomInBtn: document.getElementById('adZoomInBtn'),
+          zoomResetBtn: document.getElementById('adZoomResetBtn'),
+          zoomLabel: document.getElementById('adZoomLabel'),
+          edgeList: document.getElementById('adEdgeList'),
+          agentSourceList: document.getElementById('adAgentSourceList'),
+          commandLog: document.getElementById('adCommandLog'),
+          commandForm: document.getElementById('adCommandForm'),
+          commandInput: document.getElementById('adCommandInput'),
         };
 
         let refreshingData = false;
         let refreshingAgents = false;
-        let refreshingDeployments = false;
         let pollTimer = null;
 
         function getStatusBadge(status) {
@@ -611,7 +658,7 @@
         }
 
         function setActionButtonsDisabled(isLoading) {
-          [dp.uploadBtn, dp.jsonUploadBtn, dp.mergeBtn, ac.rerollAvatarBtn, ac.createBtn, ad.deployBtn].forEach((button) => {
+          [dp.uploadBtn, dp.jsonUploadBtn, dp.mergeBtn, ac.clearSkillsBtn, ac.rerollAvatarBtn, ac.createBtn].forEach((button) => {
             if (!button) {
               return;
             }
@@ -652,6 +699,13 @@
               `;
             })
             .join('');
+        }
+
+        function clearSelectedSkills() {
+          const checkedInputs = Array.from(ac.skillList?.querySelectorAll('input[data-skill]:checked') || []);
+          for (const input of checkedInputs) {
+            input.checked = false;
+          }
         }
 
         function renderSelectedAvatar(avatar) {
@@ -756,7 +810,8 @@
           ac.list.innerHTML = agents
             .slice(0, 6)
             .map((agent) => {
-              const skills = Array.isArray(agent.skills) && agent.skills.length > 0 ? agent.skills.join(', ') : 'none';
+              const fullSkills = Array.isArray(agent.skills) && agent.skills.length > 0 ? agent.skills.join(', ') : 'none';
+              const displaySkills = truncateForDisplay(fullSkills, 80);
               const avatar = agent.avatarUrl
                 ? `<img src="${escapeHtml(agent.avatarUrl)}" alt="${escapeHtml(agent.name)} avatar" class="h-10 w-10 rounded-xl border border-slate-200 bg-white object-cover" />`
                 : '<span class="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-xs text-slate-400">N/A</span>';
@@ -767,7 +822,7 @@
                     <div class="min-w-0">
                       <p class="font-semibold text-slate-900">${escapeHtml(agent.name)}</p>
                       <p class="mt-1 truncate text-xs text-slate-500">model: ${escapeHtml(agent.modelTier)}</p>
-                      <p class="mt-1 truncate text-xs text-slate-500">skills: ${escapeHtml(skills)}</p>
+                      <p class="mt-1 truncate text-xs text-slate-500" title="skills: ${escapeHtml(fullSkills)}">skills: ${escapeHtml(displaySkills)}</p>
                     </div>
                   </div>
                 </li>
@@ -776,77 +831,410 @@
             .join('');
         }
 
-        function renderAgentSelect(agents) {
-          const previous = ad.agentSelect.value;
-          const options = ['<option value="">배치할 Agent를 선택하세요</option>'];
+        const studioNodeWidth = 176;
+        const studioNodeHeight = 92;
+        const studioMinZoom = 0.5;
+        const studioMaxZoom = 1.8;
 
-          for (const agent of agents) {
-            options.push(`<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)} (${escapeHtml(agent.modelTier)})</option>`);
-          }
-
-          ad.agentSelect.innerHTML = options.join('');
-          if (previous && agents.some((agent) => agent.id === previous)) {
-            ad.agentSelect.value = previous;
-          }
+        function clamp(value, min, max) {
+          return Math.max(min, Math.min(max, value));
         }
 
-        function renderDeployments(deployments) {
-          if (!Array.isArray(deployments) || deployments.length === 0) {
-            ad.body.innerHTML =
-              '<tr><td class="px-3 py-3 text-sm text-slate-500" colspan="5">아직 생성된 배치가 없습니다.</td></tr>';
+        function roundToTwo(value) {
+          return Math.round(value * 100) / 100;
+        }
+
+        function getStudioViewport() {
+          if (!ad.canvas) {
+            return {
+              zoom: state.deploymentStudio.zoom,
+              width: 0,
+              height: 0,
+              maxX: 12,
+              maxY: 12,
+            };
+          }
+
+          const rect = ad.canvas.getBoundingClientRect();
+          const zoom = state.deploymentStudio.zoom;
+          const width = Math.max(rect.width / zoom, studioNodeWidth + 24);
+          const height = Math.max(rect.height / zoom, studioNodeHeight + 24);
+          const maxX = Math.max(12, width - studioNodeWidth - 12);
+          const maxY = Math.max(12, height - studioNodeHeight - 12);
+
+          return {
+            zoom,
+            width,
+            height,
+            maxX,
+            maxY,
+          };
+        }
+
+        function syncStudioViewport() {
+          if (!ad.stage || !ad.edgeLayer || !ad.nodeLayer) {
             return;
           }
 
-          ad.body.innerHTML = deployments
-            .slice(0, 20)
-            .map((deployment) => {
-              const badge = getStatusBadge(deployment.status);
+          const viewport = getStudioViewport();
+          ad.stage.style.width = `${viewport.width}px`;
+          ad.stage.style.height = `${viewport.height}px`;
+          ad.stage.style.transform = `scale(${viewport.zoom})`;
+          ad.edgeLayer.setAttribute('viewBox', `0 0 ${viewport.width} ${viewport.height}`);
+        }
+
+        function renderZoomLabel() {
+          if (!ad.zoomLabel) {
+            return;
+          }
+          ad.zoomLabel.textContent = `${Math.round(state.deploymentStudio.zoom * 100)}%`;
+        }
+
+        function setStudioZoom(nextZoom, { log = true } = {}) {
+          const zoom = clamp(roundToTwo(nextZoom), studioMinZoom, studioMaxZoom);
+          if (zoom === state.deploymentStudio.zoom) {
+            return;
+          }
+          state.deploymentStudio.zoom = zoom;
+          syncStudioViewport();
+          renderStudioNodes();
+          renderZoomLabel();
+          if (log) {
+            pushStudioLog(`캔버스 줌: ${Math.round(zoom * 100)}%`);
+          }
+        }
+
+        function getAgentById(agentId) {
+          return state.agents.find((agent) => agent.id === agentId) || null;
+        }
+
+        function getNodeById(nodeId) {
+          return state.deploymentStudio.nodes.find((node) => node.id === nodeId) || null;
+        }
+
+        function getNodeTitle(node) {
+          const agent = getAgentById(node.agentId);
+          return agent?.name || node.agentName || node.agentId;
+        }
+
+        function pushStudioLog(message) {
+          const now = new Date().toLocaleTimeString('ko-KR', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          });
+          state.deploymentStudio.logs.push(`[${now}] ${message}`);
+          state.deploymentStudio.logs = state.deploymentStudio.logs.slice(-200);
+          if (ad.commandLog) {
+            ad.commandLog.textContent = state.deploymentStudio.logs.join('\n');
+            ad.commandLog.scrollTop = ad.commandLog.scrollHeight;
+          }
+        }
+
+        function renderConnectModeButton() {
+          if (!ad.connectModeBtn) {
+            return;
+          }
+          const isOn = state.deploymentStudio.connectMode;
+          ad.connectModeBtn.textContent = isOn ? '연결 모드 ON' : '연결 모드 OFF';
+          ad.connectModeBtn.classList.toggle('bg-ink', isOn);
+          ad.connectModeBtn.classList.toggle('text-white', isOn);
+          ad.connectModeBtn.classList.toggle('border-slate-200', !isOn);
+          ad.connectModeBtn.classList.toggle('bg-white', !isOn);
+          ad.connectModeBtn.classList.toggle('text-slate-700', !isOn);
+        }
+
+        function renderEdgeList() {
+          if (!ad.edgeList) {
+            return;
+          }
+
+          if (state.deploymentStudio.edges.length === 0) {
+            ad.edgeList.innerHTML =
+              '<li class="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1 text-slate-500">아직 연결된 노드가 없습니다.</li>';
+            return;
+          }
+
+          ad.edgeList.innerHTML = state.deploymentStudio.edges
+            .map((edge) => {
+              const fromNode = getNodeById(edge.from);
+              const toNode = getNodeById(edge.to);
+              if (!fromNode || !toNode) {
+                return '';
+              }
               return `
-                <tr>
-                  <td class="px-3 py-3">
-                    <p class="font-mono text-xs text-slate-700">${escapeHtml(deployment.id.slice(0, 10))}</p>
-                    <p class="mt-1 text-xs text-slate-400">${escapeHtml(formatTime(deployment.createdAt))}</p>
-                  </td>
-                  <td class="px-3 py-3">
-                    <p class="font-semibold text-slate-900">${escapeHtml(deployment.agentName || deployment.agentId)}</p>
-                    <p class="text-xs text-slate-500">${escapeHtml(deployment.agentId.slice(0, 10))}</p>
-                  </td>
-                  <td class="px-3 py-3 text-xs text-slate-600">
-                    <p>${escapeHtml(deployment.queueName)}</p>
-                    <p class="mt-1">${escapeHtml(deployment.environment)}</p>
-                  </td>
-                  <td class="px-3 py-3">
-                    <span class="rounded-full px-2 py-1 text-xs ${badge.className}">${badge.label}</span>
-                    <p class="mt-1 text-xs text-slate-500">${escapeHtml(String(deployment.runningReplicas))}/${escapeHtml(
-                String(deployment.desiredReplicas)
-              )}</p>
-                  </td>
-                  <td class="px-3 py-3">
-                    <div class="flex items-center gap-2">
-                      <input data-scale-id="${escapeHtml(deployment.id)}" type="number" min="1" value="${escapeHtml(
-                String(deployment.desiredReplicas)
-              )}" class="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs" />
-                      <button data-scale-btn="${escapeHtml(
-                        deployment.id
-                      )}" class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">적용</button>
-                    </div>
-                  </td>
-                </tr>
+                <li class="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+                  ${escapeHtml(fromNode.id)} (${escapeHtml(getNodeTitle(fromNode))}) → ${escapeHtml(toNode.id)} (${escapeHtml(getNodeTitle(toNode))})
+                </li>
               `;
             })
+            .filter(Boolean)
             .join('');
         }
 
-        function renderDeploymentMetrics(deployments) {
-          const total = deployments.length;
-          const running = deployments.filter((deployment) => deployment.status === 'running').length;
-          const standby = deployments.filter((deployment) => deployment.status === 'standby').length;
-          const failed = deployments.filter((deployment) => deployment.status === 'failed').length;
+        function renderStudioEdges() {
+          if (!ad.edgeLayer) {
+            return;
+          }
 
-          ad.metricTotal.textContent = String(total);
-          ad.metricRunning.textContent = String(running);
-          ad.metricStandby.textContent = String(standby);
-          ad.metricFailed.textContent = String(failed);
+          const edgesMarkup = state.deploymentStudio.edges
+            .map((edge) => {
+              const fromNode = getNodeById(edge.from);
+              const toNode = getNodeById(edge.to);
+              if (!fromNode || !toNode) {
+                return '';
+              }
+
+              const fromCenter = {
+                x: fromNode.x + studioNodeWidth / 2,
+                y: fromNode.y + studioNodeHeight / 2,
+              };
+              const toCenter = {
+                x: toNode.x + studioNodeWidth / 2,
+                y: toNode.y + studioNodeHeight / 2,
+              };
+              const dx = toCenter.x - fromCenter.x;
+              const dy = toCenter.y - fromCenter.y;
+
+              const fromAnchor = { ...fromCenter };
+              const toAnchor = { ...toCenter };
+              if (Math.abs(dx) >= Math.abs(dy)) {
+                const horizontalDir = dx >= 0 ? 1 : -1;
+                fromAnchor.x += (studioNodeWidth / 2) * horizontalDir;
+                toAnchor.x -= (studioNodeWidth / 2) * horizontalDir;
+              } else {
+                const verticalDir = dy >= 0 ? 1 : -1;
+                fromAnchor.y += (studioNodeHeight / 2) * verticalDir;
+                toAnchor.y -= (studioNodeHeight / 2) * verticalDir;
+              }
+
+              const curve = Math.max(36, Math.min(120, Math.hypot(dx, dy) * 0.25));
+              let c1x = fromAnchor.x;
+              let c1y = fromAnchor.y;
+              let c2x = toAnchor.x;
+              let c2y = toAnchor.y;
+
+              if (Math.abs(dx) >= Math.abs(dy)) {
+                const dir = dx >= 0 ? 1 : -1;
+                c1x += curve * dir;
+                c2x -= curve * dir;
+              } else {
+                const dir = dy >= 0 ? 1 : -1;
+                c1y += curve * dir;
+                c2y -= curve * dir;
+              }
+
+              const path = `M ${fromAnchor.x} ${fromAnchor.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${toAnchor.x} ${toAnchor.y}`;
+              return `
+                <path d="${path}" fill="none" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round" marker-end="url(#adArrowHead)" />
+                <circle cx="${fromAnchor.x}" cy="${fromAnchor.y}" r="3.5" fill="#0ea5e9" />
+              `;
+            })
+            .filter(Boolean)
+            .join('');
+
+          ad.edgeLayer.innerHTML = `
+            <defs>
+              <marker id="adArrowHead" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L12,6 L0,12 Z" fill="#0ea5e9"></path>
+              </marker>
+            </defs>
+            ${edgesMarkup}
+          `;
+        }
+
+        function renderStudioNodes() {
+          if (!ad.nodeLayer || !ad.canvasEmpty) {
+            return;
+          }
+
+          syncStudioViewport();
+          const viewport = getStudioViewport();
+          const nodes = state.deploymentStudio.nodes;
+          for (const node of nodes) {
+            node.x = clamp(node.x, 12, viewport.maxX);
+            node.y = clamp(node.y, 12, viewport.maxY);
+          }
+          ad.canvasEmpty.classList.toggle('hidden', nodes.length > 0);
+          ad.nodeLayer.innerHTML = nodes
+            .map((node) => {
+              const agent = getAgentById(node.agentId);
+              const skills = Array.isArray(agent?.skills) && agent.skills.length > 0 ? agent.skills.join(', ') : 'none';
+              const avatar = agent?.avatarUrl
+                ? `<img src="${escapeHtml(agent.avatarUrl)}" alt="${escapeHtml(agent.name)} avatar" class="h-8 w-8 rounded-lg border border-slate-200 bg-white object-cover" />`
+                : '<span class="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-[10px] text-slate-400">N/A</span>';
+              const isSelected = state.deploymentStudio.pendingFromNodeId === node.id;
+              const selectedClass = isSelected ? 'ring-2 ring-electric/60' : 'ring-0';
+              const dragClass = state.deploymentStudio.connectMode ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing';
+
+              return `
+                <button
+                  type="button"
+                  data-node-id="${escapeHtml(node.id)}"
+                  class="absolute w-44 rounded-xl border border-slate-200 bg-white p-2 text-left shadow-soft transition hover:-translate-y-0.5 ${selectedClass} ${dragClass}"
+                  style="left:${node.x}px; top:${node.y}px;"
+                >
+                  <div class="flex items-start gap-2">
+                    ${avatar}
+                    <div class="min-w-0">
+                      <p class="truncate text-sm font-semibold text-slate-900">${escapeHtml(agent?.name || node.agentName || node.agentId)}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-slate-500">model: ${escapeHtml(agent?.modelTier || 'Balanced (default)')}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-slate-500">skills: ${escapeHtml(skills)}</p>
+                    </div>
+                  </div>
+                  <p class="mt-1 text-[10px] text-slate-400">${escapeHtml(node.id)}</p>
+                </button>
+              `;
+            })
+            .join('');
+
+          renderStudioEdges();
+          renderEdgeList();
+          renderConnectModeButton();
+          renderZoomLabel();
+        }
+
+        function addNodeToStudio(agentId, x, y) {
+          const agent = getAgentById(agentId);
+          if (!agent || !ad.canvas) {
+            setNotice(ad.notice, '선택한 Agent를 찾을 수 없습니다.', 'error');
+            return;
+          }
+
+          const viewport = getStudioViewport();
+          const safeX = clamp(x, 12, viewport.maxX);
+          const safeY = clamp(y, 12, viewport.maxY);
+          const nodeId = `node-${state.deploymentStudio.nextNodeSeq++}`;
+
+          state.deploymentStudio.nodes.push({
+            id: nodeId,
+            agentId: agent.id,
+            agentName: agent.name,
+            x: Math.round(safeX),
+            y: Math.round(safeY),
+          });
+
+          renderStudioNodes();
+          pushStudioLog(`노드 추가: ${nodeId} (${agent.name})`);
+        }
+
+        function addEdgeToStudio(fromNodeId, toNodeId) {
+          if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) {
+            return;
+          }
+          const alreadyExists = state.deploymentStudio.edges.some(
+            (edge) => edge.from === fromNodeId && edge.to === toNodeId
+          );
+          if (alreadyExists) {
+            return;
+          }
+
+          state.deploymentStudio.edges.push({
+            from: fromNodeId,
+            to: toNodeId,
+          });
+          renderStudioNodes();
+        }
+
+        function clearStudio() {
+          state.deploymentStudio.nodes = [];
+          state.deploymentStudio.edges = [];
+          state.deploymentStudio.pendingFromNodeId = null;
+          renderStudioNodes();
+          pushStudioLog('캔버스 초기화 완료');
+        }
+
+        function executeStudioCommand(commandRaw) {
+          const command = String(commandRaw || '').trim();
+          if (!command) {
+            return;
+          }
+          pushStudioLog(`$ ${command}`);
+
+          const parts = command.split(/\s+/);
+          const base = parts[0]?.toLowerCase();
+          const sub = parts[1]?.toLowerCase();
+
+          if (base === 'help') {
+            pushStudioLog('명령어: help | list nodes | list edges | connect <fromNodeId> <toNodeId> | clear');
+            return;
+          }
+
+          if (base === 'list' && sub === 'nodes') {
+            if (state.deploymentStudio.nodes.length === 0) {
+              pushStudioLog('nodes: []');
+              return;
+            }
+            for (const node of state.deploymentStudio.nodes) {
+              pushStudioLog(`${node.id} => ${getNodeTitle(node)} @ (${node.x}, ${node.y})`);
+            }
+            return;
+          }
+
+          if (base === 'list' && sub === 'edges') {
+            if (state.deploymentStudio.edges.length === 0) {
+              pushStudioLog('edges: []');
+              return;
+            }
+            for (const edge of state.deploymentStudio.edges) {
+              pushStudioLog(`${edge.from} -> ${edge.to}`);
+            }
+            return;
+          }
+
+          if (base === 'connect' && parts.length >= 3) {
+            const fromNodeId = parts[1];
+            const toNodeId = parts[2];
+            if (!getNodeById(fromNodeId) || !getNodeById(toNodeId)) {
+              pushStudioLog('노드 ID를 찾을 수 없습니다.');
+              return;
+            }
+            addEdgeToStudio(fromNodeId, toNodeId);
+            return;
+          }
+
+          if (base === 'clear') {
+            clearStudio();
+            return;
+          }
+
+          pushStudioLog(`알 수 없는 명령어: ${command}`);
+        }
+
+        function renderAgentSourceList(agents) {
+          if (!ad.agentSourceList) {
+            return;
+          }
+
+          if (!Array.isArray(agents) || agents.length === 0) {
+            ad.agentSourceList.innerHTML =
+              '<li class="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-500">아직 생성된 Agent가 없습니다.</li>';
+            return;
+          }
+
+          ad.agentSourceList.innerHTML = agents
+            .slice(0, 20)
+            .map((agent) => {
+              const avatar = agent.avatarUrl
+                ? `<img src="${escapeHtml(agent.avatarUrl)}" alt="${escapeHtml(agent.name)} avatar" class="h-8 w-8 rounded-lg border border-slate-200 bg-white object-cover" />`
+                : '<span class="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-[10px] text-slate-400">N/A</span>';
+              return `
+                <li
+                  draggable="true"
+                  data-agent-id="${escapeHtml(agent.id)}"
+                  class="cursor-grab rounded-xl border border-slate-200 bg-white p-2 active:cursor-grabbing"
+                >
+                  <div class="flex items-start gap-2">
+                    ${avatar}
+                    <div class="min-w-0">
+                      <p class="truncate text-sm font-semibold text-slate-900">${escapeHtml(agent.name)}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-slate-500">model: ${escapeHtml(agent.modelTier)}</p>
+                    </div>
+                  </div>
+                </li>
+              `;
+            })
+            .join('');
         }
 
         async function refreshDataProcessing() {
@@ -882,7 +1270,7 @@
             const response = await requestJson('/api/agents?limit=60');
             state.agents = Array.isArray(response.agents) ? response.agents : [];
             renderAgents(state.agents);
-            renderAgentSelect(state.agents);
+            renderAgentSourceList(state.agents);
           } catch (error) {
             setNotice(ac.notice, `Agent 조회 실패: ${error.message}`, 'error');
           } finally {
@@ -911,21 +1299,207 @@
           }
         }
 
-        async function refreshDeployments() {
-          if (refreshingDeployments) {
-            return;
-          }
-          refreshingDeployments = true;
-          try {
-            const response = await requestJson('/api/deployments?limit=100');
-            state.deployments = Array.isArray(response.deployments) ? response.deployments : [];
-            renderDeployments(state.deployments);
-            renderDeploymentMetrics(state.deployments);
-          } catch (error) {
-            setNotice(ad.notice, `배치 조회 실패: ${error.message}`, 'error');
-          } finally {
-            refreshingDeployments = false;
-          }
+        function initializeDeploymentStudio() {
+          renderStudioNodes();
+          let studioDrag = null;
+          let suppressNodeClickOnce = false;
+
+          ad.connectModeBtn?.addEventListener('click', () => {
+            state.deploymentStudio.connectMode = !state.deploymentStudio.connectMode;
+            state.deploymentStudio.pendingFromNodeId = null;
+            renderStudioNodes();
+            pushStudioLog(
+              state.deploymentStudio.connectMode
+                ? '연결 모드 활성화: 출발 노드 -> 도착 노드를 순서대로 클릭하세요.'
+                : '연결 모드 비활성화'
+            );
+          });
+
+          ad.clearCanvasBtn?.addEventListener('click', () => {
+            clearStudio();
+          });
+
+          ad.zoomOutBtn?.addEventListener('click', () => {
+            setStudioZoom(state.deploymentStudio.zoom - 0.1);
+          });
+
+          ad.zoomInBtn?.addEventListener('click', () => {
+            setStudioZoom(state.deploymentStudio.zoom + 0.1);
+          });
+
+          ad.zoomResetBtn?.addEventListener('click', () => {
+            setStudioZoom(1);
+          });
+
+          ad.canvas?.addEventListener(
+            'wheel',
+            (event) => {
+              if (!(event.ctrlKey || event.metaKey)) {
+                return;
+              }
+              event.preventDefault();
+              const delta = event.deltaY < 0 ? 0.05 : -0.05;
+              setStudioZoom(state.deploymentStudio.zoom + delta, { log: false });
+            },
+            { passive: false }
+          );
+
+          window.addEventListener('resize', () => {
+            syncStudioViewport();
+            renderStudioNodes();
+          });
+
+          ad.agentSourceList?.addEventListener('dragstart', (event) => {
+            const target = event.target instanceof Element ? event.target.closest('[data-agent-id]') : null;
+            if (!target || !event.dataTransfer) {
+              return;
+            }
+            event.dataTransfer.effectAllowed = 'copy';
+            event.dataTransfer.setData('text/agent-id', target.getAttribute('data-agent-id'));
+          });
+
+          ad.canvas?.addEventListener('dragover', (event) => {
+            event.preventDefault();
+            ad.canvas.classList.add('ring-2');
+          });
+
+          ad.canvas?.addEventListener('dragleave', () => {
+            ad.canvas.classList.remove('ring-2');
+          });
+
+          ad.canvas?.addEventListener('drop', (event) => {
+            event.preventDefault();
+            ad.canvas.classList.remove('ring-2');
+            const agentId = event.dataTransfer?.getData('text/agent-id');
+            if (!agentId || !ad.canvas) {
+              return;
+            }
+
+            const rect = ad.canvas.getBoundingClientRect();
+            const zoom = state.deploymentStudio.zoom;
+            const x = (event.clientX - rect.left) / zoom - studioNodeWidth / 2;
+            const y = (event.clientY - rect.top) / zoom - studioNodeHeight / 2;
+            addNodeToStudio(agentId, x, y);
+          });
+
+          ad.nodeLayer?.addEventListener('mousedown', (event) => {
+            if (state.deploymentStudio.connectMode || !ad.canvas) {
+              return;
+            }
+            if (event.button !== 0) {
+              return;
+            }
+
+            const target = event.target instanceof Element ? event.target.closest('[data-node-id]') : null;
+            if (!target) {
+              return;
+            }
+
+            const nodeId = target.getAttribute('data-node-id');
+            const node = getNodeById(nodeId);
+            if (!node) {
+              return;
+            }
+
+            const viewport = getStudioViewport();
+            studioDrag = {
+              node,
+              target,
+              startClientX: event.clientX,
+              startClientY: event.clientY,
+              startX: node.x,
+              startY: node.y,
+              zoom: viewport.zoom,
+              maxX: viewport.maxX,
+              maxY: viewport.maxY,
+              moved: false,
+            };
+            document.body.style.userSelect = 'none';
+          });
+
+          window.addEventListener('mousemove', (event) => {
+            if (!studioDrag) {
+              return;
+            }
+
+            const dxScreen = event.clientX - studioDrag.startClientX;
+            const dyScreen = event.clientY - studioDrag.startClientY;
+            const dx = dxScreen / studioDrag.zoom;
+            const dy = dyScreen / studioDrag.zoom;
+            const nextX = clamp(studioDrag.startX + dx, 12, studioDrag.maxX);
+            const nextY = clamp(studioDrag.startY + dy, 12, studioDrag.maxY);
+
+            if (Math.abs(dxScreen) > 2 || Math.abs(dyScreen) > 2) {
+              studioDrag.moved = true;
+            }
+
+            studioDrag.node.x = Math.round(nextX);
+            studioDrag.node.y = Math.round(nextY);
+            studioDrag.target.style.left = `${studioDrag.node.x}px`;
+            studioDrag.target.style.top = `${studioDrag.node.y}px`;
+            renderStudioEdges();
+          });
+
+          window.addEventListener('mouseup', () => {
+            if (!studioDrag) {
+              return;
+            }
+
+            const moved = studioDrag.moved;
+            studioDrag = null;
+            document.body.style.userSelect = '';
+
+            if (moved) {
+              suppressNodeClickOnce = true;
+            }
+          });
+
+          ad.nodeLayer?.addEventListener('click', (event) => {
+            if (suppressNodeClickOnce) {
+              suppressNodeClickOnce = false;
+              return;
+            }
+            const target = event.target instanceof Element ? event.target.closest('[data-node-id]') : null;
+            if (!target) {
+              return;
+            }
+            const nodeId = target.getAttribute('data-node-id');
+            const node = getNodeById(nodeId);
+            if (!node) {
+              return;
+            }
+
+            if (!state.deploymentStudio.connectMode) {
+              pushStudioLog(`노드 선택: ${node.id} (${getNodeTitle(node)})`);
+              return;
+            }
+
+            if (!state.deploymentStudio.pendingFromNodeId) {
+              state.deploymentStudio.pendingFromNodeId = node.id;
+              renderStudioNodes();
+              return;
+            }
+
+            if (state.deploymentStudio.pendingFromNodeId === node.id) {
+              state.deploymentStudio.pendingFromNodeId = null;
+              renderStudioNodes();
+              return;
+            }
+
+            addEdgeToStudio(state.deploymentStudio.pendingFromNodeId, node.id);
+            state.deploymentStudio.pendingFromNodeId = null;
+            renderStudioNodes();
+          });
+
+          ad.commandForm?.addEventListener('submit', (event) => {
+            event.preventDefault();
+            const command = ad.commandInput?.value || '';
+            executeStudioCommand(command);
+            if (ad.commandInput) {
+              ad.commandInput.value = '';
+              ad.commandInput.focus();
+            }
+          });
         }
 
         async function uploadFile() {
@@ -1065,82 +1639,21 @@
           }
         }
 
-        async function createDeployment() {
-          const agentId = ad.agentSelect.value;
-          const queueName = ad.queueName.value.trim() || 'default';
-          const environment = ad.environment.value;
-          const desiredReplicas = Number(ad.replicas.value) || 1;
-
-          if (!agentId) {
-            setNotice(ad.notice, '배치할 Agent를 선택하세요.', 'error');
-            return;
-          }
-
-          setActionButtonsDisabled(true);
-          try {
-            const result = await requestJson('/api/deployments', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                agentId,
-                queueName,
-                environment,
-                desiredReplicas,
-              }),
-            });
-
-            setNotice(ad.notice, `배치 생성 완료: ${result.deployment.id.slice(0, 10)}`, 'success');
-            await refreshDeployments();
-          } catch (error) {
-            setNotice(ad.notice, `배치 생성 실패: ${error.message}`, 'error');
-          } finally {
-            setActionButtonsDisabled(false);
-          }
-        }
-
-        async function scaleDeployment(deploymentId, nextReplicas) {
-          setActionButtonsDisabled(true);
-          try {
-            await requestJson(`/api/deployments/${deploymentId}/scale`, {
-              method: 'PATCH',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ desiredReplicas: nextReplicas }),
-            });
-
-            setNotice(ad.notice, `배치 스케일 변경 완료: ${deploymentId.slice(0, 10)} -> ${nextReplicas}`, 'success');
-            await refreshDeployments();
-          } catch (error) {
-            setNotice(ad.notice, `스케일 변경 실패: ${error.message}`, 'error');
-          } finally {
-            setActionButtonsDisabled(false);
-          }
-        }
-
         dp.uploadBtn?.addEventListener('click', uploadFile);
         dp.jsonUploadBtn?.addEventListener('click', uploadJsonTable);
         dp.mergeBtn?.addEventListener('click', runMerge);
+        ac.clearSkillsBtn?.addEventListener('click', clearSelectedSkills);
         ac.rerollAvatarBtn?.addEventListener('click', drawRandomAvatar);
         ac.createBtn?.addEventListener('click', createAgent);
-        ad.deployBtn?.addEventListener('click', createDeployment);
 
-        ad.body?.addEventListener('click', (event) => {
-          const button = event.target.closest('[data-scale-btn]');
-          if (!button) {
-            return;
-          }
+        initializeDeploymentStudio();
 
-          const deploymentId = button.getAttribute('data-scale-btn');
-          const input = ad.body.querySelector(`input[data-scale-id="${deploymentId}"]`);
-          const nextReplicas = Number(input?.value || '1') || 1;
-          scaleDeployment(deploymentId, Math.max(1, nextReplicas));
-        });
-
-        Promise.all([refreshDataProcessing(), refreshAgents(), refreshDeployments(), refreshSkills(), drawRandomAvatar()]).catch((error) => {
+        Promise.all([refreshDataProcessing(), refreshAgents(), refreshSkills(), drawRandomAvatar()]).catch((error) => {
           console.error('initial refresh failed', error);
         });
 
         pollTimer = setInterval(() => {
-          Promise.all([refreshDataProcessing(), refreshAgents(), refreshDeployments()]).catch(() => {});
+          Promise.all([refreshDataProcessing(), refreshAgents()]).catch(() => {});
         }, 2500);
 
         window.addEventListener('beforeunload', () => {
