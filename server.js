@@ -12,6 +12,12 @@ const { IngestionJobQueue } = require("./src/pipeline/job-queue");
 const app = express();
 const port = Number(process.env.PORT) || 3000;
 const MICROCACHE_TTL_MS = Math.max(0, Number(process.env.MICROCACHE_TTL_MS || 0));
+const isProduction = process.env.NODE_ENV === "production";
+const runtimeMode = String(process.env.RUNTIME_MODE || "").trim().toLowerCase();
+const isServerlessRuntime =
+  runtimeMode === "serverless" ||
+  process.env.VERCEL === "1" ||
+  process.env.VERCEL === "true";
 const LATENCY_SAMPLE_SIZE = Math.max(1, Number(process.env.LATENCY_SAMPLE_SIZE || 2048));
 const MAX_UPLOAD_SIZE_MB = Math.max(1, Number(process.env.MAX_UPLOAD_SIZE_MB || 20));
 const JOB_POLL_INTERVAL_MS = Math.max(100, Number(process.env.JOB_POLL_INTERVAL_MS || 750));
@@ -34,23 +40,25 @@ const upload = multer({
 
 const viewsDir = path.join(__dirname, "views");
 const dashboardTemplatePath = path.join(viewsDir, "dashboard.ejs");
-const dashboardTemplateSource = fs.readFileSync(dashboardTemplatePath, "utf8");
-const renderDashboard = ejs.compile(dashboardTemplateSource, {
-  filename: dashboardTemplatePath,
-  rmWhitespace: true,
-});
 const cssPath = path.join(__dirname, "public/css/tailwind.css");
-const cssVersion = fs.existsSync(cssPath)
+const getCssVersion = () =>
+  fs.existsSync(cssPath)
   ? String(Math.floor(fs.statSync(cssPath).mtimeMs))
   : String(Date.now());
-const dashboardData = Object.freeze({
+const initialDashboardData = Object.freeze({
   pageTitle: "SaaS Control Center",
-  assetVersion: cssVersion,
+  assetVersion: getCssVersion(),
   user: Object.freeze({
     name: "Choi",
     role: "Founder",
   }),
 });
+const compiledDashboardTemplate = isProduction
+  ? ejs.compile(fs.readFileSync(dashboardTemplatePath, "utf8"), {
+      filename: dashboardTemplatePath,
+      rmWhitespace: true,
+    })
+  : null;
 const avatarsDir = path.join(__dirname, "avatars");
 const avatarCatalogCache = {
   files: [],
@@ -63,12 +71,18 @@ const skillSourceRoots = [
 ];
 
 const routeCache = new Map();
+const useRouteCache = isProduction && MICROCACHE_TTL_MS > 0;
 const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
 const latencySamples = new Float64Array(LATENCY_SAMPLE_SIZE);
 let latencyIndex = 0;
 let latencyCount = 0;
 let requestsTotal = 0;
 let inflightRequests = 0;
+let initialized = false;
+let initPromise = null;
+let queueStarted = false;
+let httpServer = null;
+let shutdownHooksRegistered = false;
 
 eventLoopDelay.enable();
 app.disable("x-powered-by");
@@ -111,6 +125,29 @@ function getLatencySnapshot() {
     p99_ms: percentile(99),
     max_ms: round(values[values.length - 1]),
   };
+}
+
+function buildDashboardData() {
+  return {
+    ...initialDashboardData,
+    assetVersion: isProduction
+      ? initialDashboardData.assetVersion
+      : getCssVersion(),
+  };
+}
+
+function renderDashboardView() {
+  if (isProduction) {
+    return compiledDashboardTemplate(buildDashboardData());
+  }
+
+  const dashboardTemplateSource = fs.readFileSync(dashboardTemplatePath, "utf8");
+  const renderDashboard = ejs.compile(dashboardTemplateSource, {
+    filename: dashboardTemplatePath,
+    rmWhitespace: true,
+  });
+
+  return renderDashboard(buildDashboardData());
 }
 
 function sanitizeTableRows(rows) {
@@ -314,6 +351,42 @@ function listAvailableSkills() {
   return skills.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+async function ensureInitialized() {
+  if (initialized) {
+    return;
+  }
+
+  if (!initPromise) {
+    initPromise = (async () => {
+      await repository.init();
+
+      const storedFields = await repository.listOntologyFields();
+      if (storedFields.length > 0) {
+        ontologyService.loadFields(storedFields);
+      } else {
+        await repository.upsertOntologyFields(ontologyService.listFields());
+      }
+
+      const storedOverrides = await repository.listColumnOverrides();
+      ontologyService.loadOverrides(storedOverrides);
+
+      initialized = true;
+    })().catch((error) => {
+      initPromise = null;
+      throw error;
+    });
+  }
+
+  await initPromise;
+}
+
+async function flushQueueForServerless() {
+  if (!isServerlessRuntime) {
+    return;
+  }
+  await jobQueue.processTick();
+}
+
 app.use((req, res, next) => {
   const start = process.hrtime.bigint();
   requestsTotal += 1;
@@ -348,7 +421,7 @@ app.get("/", (req, res, next) => {
   const cacheKey = "dashboard";
   const now = Date.now();
 
-  if (MICROCACHE_TTL_MS > 0) {
+  if (useRouteCache) {
     const cached = routeCache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
       res.set("x-cache", "HIT");
@@ -357,9 +430,9 @@ app.get("/", (req, res, next) => {
   }
 
   try {
-    const html = renderDashboard(dashboardData);
+    const html = renderDashboardView();
 
-    if (MICROCACHE_TTL_MS > 0) {
+    if (useRouteCache) {
       routeCache.set(cacheKey, {
         html,
         expiresAt: now + MICROCACHE_TTL_MS,
@@ -740,8 +813,13 @@ app.post("/api/data/upload", upload.single("file"), async (req, res) => {
       },
     });
 
+    await flushQueueForServerless();
+    const resolvedJob = isServerlessRuntime
+      ? await repository.getJob(job.id)
+      : job;
+
     return res.status(202).json({
-      job: summarizeJob(job),
+      job: summarizeJob(resolvedJob || job),
       source: {
         sheetName: parsedWorkbook.sheetName,
         fileName: req.file.originalname,
@@ -787,8 +865,13 @@ app.post("/api/data/table", async (req, res) => {
       },
     });
 
+    await flushQueueForServerless();
+    const resolvedJob = isServerlessRuntime
+      ? await repository.getJob(job.id)
+      : job;
+
     return res.status(202).json({
-      job: summarizeJob(job),
+      job: summarizeJob(resolvedJob || job),
     });
   } catch (error) {
     return res.status(400).json({
@@ -800,6 +883,7 @@ app.post("/api/data/table", async (req, res) => {
 
 app.get("/api/jobs", async (req, res, next) => {
   try {
+    await flushQueueForServerless();
     const limit = toPositiveInt(req.query.limit, 50);
     const jobs = await repository.listJobs(limit);
     return res.json({
@@ -812,6 +896,7 @@ app.get("/api/jobs", async (req, res, next) => {
 
 app.get("/api/jobs/:jobId", async (req, res, next) => {
   try {
+    await flushQueueForServerless();
     const job = await repository.getJob(req.params.jobId);
     if (!job) {
       return res.status(404).json({
@@ -830,6 +915,7 @@ app.get("/api/jobs/:jobId", async (req, res, next) => {
 
 app.get("/api/data/datasets", async (req, res, next) => {
   try {
+    await flushQueueForServerless();
     const datasets = await repository.listDatasets();
     return res.json({ datasets });
   } catch (error) {
@@ -901,40 +987,77 @@ app.use((error, req, res, next) => {
   return res.status(500).json({ error: "internal_server_error" });
 });
 
-async function bootstrap() {
-  await repository.init();
-
-  const storedFields = await repository.listOntologyFields();
-  if (storedFields.length > 0) {
-    ontologyService.loadFields(storedFields);
-  } else {
-    await repository.upsertOntologyFields(ontologyService.listFields());
+function ensureQueueStarted() {
+  if (queueStarted || isServerlessRuntime) {
+    return;
   }
-
-  const storedOverrides = await repository.listColumnOverrides();
-  ontologyService.loadOverrides(storedOverrides);
-
   jobQueue.start();
+  queueStarted = true;
+}
 
-  const server = app.listen(port, () => {
-    console.log(
-      `Dashboard running at http://localhost:${port} (storage=${repository.type()}, queue=${JOB_POLL_INTERVAL_MS}ms)`
-    );
-  });
+function registerShutdownHooks() {
+  if (shutdownHooksRegistered) {
+    return;
+  }
 
   const shutdown = (signal) => {
     console.log(`Received ${signal}. Shutting down...`);
     jobQueue.stop();
-    server.close(() => {
-      process.exit(0);
-    });
+    if (httpServer) {
+      httpServer.close(() => {
+        process.exit(0);
+      });
+      return;
+    }
+    process.exit(0);
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  shutdownHooksRegistered = true;
 }
 
-bootstrap().catch((error) => {
-  console.error("Bootstrap failed:", error);
-  process.exit(1);
-});
+function ensureHttpServerStarted() {
+  if (httpServer) {
+    return httpServer;
+  }
+
+  httpServer = app.listen(port, () => {
+    console.log(
+      `Dashboard running at http://localhost:${port} (storage=${repository.type()}, queue=${JOB_POLL_INTERVAL_MS}ms, mode=${isServerlessRuntime ? "serverless" : "node"})`
+    );
+  });
+
+  return httpServer;
+}
+
+async function bootstrap({
+  startQueue = !isServerlessRuntime,
+  startServer = true,
+} = {}) {
+  await ensureInitialized();
+
+  if (startQueue) {
+    ensureQueueStarted();
+  }
+
+  if (startServer) {
+    registerShutdownHooks();
+    return ensureHttpServerStarted();
+  }
+
+  return null;
+}
+
+if (require.main === module) {
+  bootstrap().catch((error) => {
+    console.error("Bootstrap failed:", error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app,
+  bootstrap,
+  ensureInitialized,
+};
