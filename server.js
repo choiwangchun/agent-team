@@ -7,6 +7,7 @@ const multer = require("multer");
 const XLSX = require("xlsx");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { createClient } = require("@supabase/supabase-js");
 const { monitorEventLoopDelay, performance } = require("perf_hooks");
 const { OntologyService } = require("./src/ontology/service");
 const { createRepository } = require("./src/data/repository");
@@ -60,6 +61,27 @@ const LOGIN_MAX_ATTEMPTS = Math.max(
 );
 const ACCESS_COOKIE_NAME = "aw_access_token";
 const REFRESH_COOKIE_NAME = "aw_refresh_token";
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").trim();
+const SUPABASE_SERVICE_ROLE_KEY = String(
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ""
+).trim();
+const SUPABASE_AVATAR_BUCKET = String(
+  process.env.SUPABASE_AVATAR_BUCKET || "avatars"
+).trim();
+const SUPABASE_AVATAR_PREFIX = String(
+  process.env.SUPABASE_AVATAR_PREFIX || ""
+).trim();
+const SUPABASE_AVATAR_PUBLIC = String(
+  process.env.SUPABASE_AVATAR_PUBLIC || "true"
+).trim().toLowerCase() !== "false";
+const SUPABASE_AVATAR_SIGNED_URL_EXPIRES_SEC = Math.max(
+  60,
+  Number(process.env.SUPABASE_AVATAR_SIGNED_URL_EXPIRES_SEC || 60 * 60)
+);
+const SUPABASE_AVATAR_MAX_FILES = Math.max(
+  100,
+  Number(process.env.SUPABASE_AVATAR_MAX_FILES || 5000)
+);
 const MB = 1024 * 1024;
 
 const repository = createRepository();
@@ -97,12 +119,20 @@ const compiledDashboardTemplate = isProduction
       rmWhitespace: true,
     })
   : null;
-const avatarsDir = path.join(__dirname, "avatars");
+const localAvatarDirs = [
+  path.join(__dirname, "public/avatars"),
+  path.join(__dirname, "avatars"),
+];
+const avatarStaticDir =
+  localAvatarDirs.find((item) => fs.existsSync(item)) ||
+  localAvatarDirs[0];
 const avatarCatalogCache = {
+  source: "none",
   files: [],
   loadedAt: 0,
 };
 const AVATAR_CATALOG_TTL_MS = 5 * 60 * 1000;
+let supabaseAdminClient = null;
 const skillSourceRoots = [
   path.join(process.env.HOME || "", ".codex/skills"),
   path.join(process.env.HOME || "", ".agents/skills"),
@@ -342,21 +372,184 @@ function listFilesRecursive(rootDir, predicate) {
   return files;
 }
 
-function loadAvatarCatalog() {
-  const now = Date.now();
-  if (
-    avatarCatalogCache.files.length > 0 &&
-    now - avatarCatalogCache.loadedAt < AVATAR_CATALOG_TTL_MS
-  ) {
-    return avatarCatalogCache.files;
+function normalizeStoragePrefix(value) {
+  return String(value || "").trim().replace(/^\/+|\/+$/g, "");
+}
+
+function hasSupabaseAvatarStorage() {
+  return Boolean(
+    SUPABASE_URL &&
+      SUPABASE_SERVICE_ROLE_KEY &&
+      SUPABASE_AVATAR_BUCKET
+  );
+}
+
+function getSupabaseAdminClient() {
+  if (!hasSupabaseAvatarStorage()) {
+    return null;
+  }
+  if (supabaseAdminClient) {
+    return supabaseAdminClient;
+  }
+  supabaseAdminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+  return supabaseAdminClient;
+}
+
+function loadLocalAvatarCatalog() {
+  const files = [];
+  const seen = new Set();
+  for (const rootDir of localAvatarDirs) {
+    const localFiles = listFilesRecursive(rootDir, (item) =>
+      item.toLowerCase().endsWith(".svg")
+    );
+    for (const file of localFiles) {
+      const key = file.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      files.push(file);
+    }
+  }
+  return files;
+}
+
+async function listSupabaseFilesRecursive(
+  client,
+  bucket,
+  prefix = "",
+  maxFiles = SUPABASE_AVATAR_MAX_FILES
+) {
+  const files = [];
+  const directories = [normalizeStoragePrefix(prefix)];
+  const limit = 1000;
+
+  while (directories.length > 0 && files.length < maxFiles) {
+    const currentPrefix = directories.pop();
+    let offset = 0;
+
+    while (files.length < maxFiles) {
+      const { data, error } = await client.storage.from(bucket).list(currentPrefix, {
+        limit,
+        offset,
+        sortBy: {
+          column: "name",
+          order: "asc",
+        },
+      });
+
+      if (error) {
+        throw new Error(error.message || "failed to list storage objects");
+      }
+
+      const entries = Array.isArray(data) ? data : [];
+      for (const entry of entries) {
+        const name = String(entry?.name || "").trim();
+        if (!name) {
+          continue;
+        }
+
+        const fullPath = currentPrefix ? `${currentPrefix}/${name}` : name;
+        const metadata = entry?.metadata;
+        const isDirectory = !entry?.id && (metadata === null || metadata === undefined);
+
+        if (isDirectory) {
+          directories.push(fullPath);
+          continue;
+        }
+
+        if (name.toLowerCase().endsWith(".svg")) {
+          files.push(fullPath);
+          if (files.length >= maxFiles) {
+            break;
+          }
+        }
+      }
+
+      if (entries.length < limit) {
+        break;
+      }
+
+      offset += limit;
+    }
   }
 
-  const files = listFilesRecursive(avatarsDir, (item) =>
-    item.toLowerCase().endsWith(".svg")
-  );
-  avatarCatalogCache.files = files;
-  avatarCatalogCache.loadedAt = now;
   return files;
+}
+
+async function loadAvatarCatalog() {
+  const now = Date.now();
+  const supabaseEnabled = hasSupabaseAvatarStorage();
+  const preferredSource = supabaseEnabled ? "supabase" : "local";
+
+  if (
+    avatarCatalogCache.files.length > 0 &&
+    now - avatarCatalogCache.loadedAt < AVATAR_CATALOG_TTL_MS &&
+    avatarCatalogCache.source === preferredSource
+  ) {
+    return {
+      files: avatarCatalogCache.files,
+      source: avatarCatalogCache.source,
+      client: supabaseEnabled ? getSupabaseAdminClient() : null,
+    };
+  }
+
+  if (supabaseEnabled) {
+    const client = getSupabaseAdminClient();
+    try {
+      const files = await listSupabaseFilesRecursive(
+        client,
+        SUPABASE_AVATAR_BUCKET,
+        SUPABASE_AVATAR_PREFIX
+      );
+      if (files.length > 0) {
+        avatarCatalogCache.files = files;
+        avatarCatalogCache.loadedAt = now;
+        avatarCatalogCache.source = "supabase";
+        return {
+          files,
+          source: "supabase",
+          client,
+        };
+      }
+    } catch (error) {
+      console.error("[avatar] supabase listing failed:", error.message);
+    }
+  }
+
+  const localFiles = loadLocalAvatarCatalog();
+  avatarCatalogCache.files = localFiles;
+  avatarCatalogCache.loadedAt = now;
+  avatarCatalogCache.source = localFiles.length > 0 ? "local" : "none";
+  return {
+    files: localFiles,
+    source: avatarCatalogCache.source,
+    client: null,
+  };
+}
+
+async function resolveSupabaseAvatarUrl(client, filePath) {
+  if (!client) {
+    return "";
+  }
+
+  if (SUPABASE_AVATAR_PUBLIC) {
+    const { data } = client.storage.from(SUPABASE_AVATAR_BUCKET).getPublicUrl(filePath);
+    return String(data?.publicUrl || "");
+  }
+
+  const { data, error } = await client.storage
+    .from(SUPABASE_AVATAR_BUCKET)
+    .createSignedUrl(filePath, SUPABASE_AVATAR_SIGNED_URL_EXPIRES_SEC);
+  if (error) {
+    throw new Error(error.message || "failed to create signed avatar url");
+  }
+  return String(data?.signedUrl || "");
 }
 
 function createGeneratedAvatar() {
@@ -804,7 +997,7 @@ app.use(
 );
 app.use(
   "/avatars",
-  express.static(avatarsDir, {
+  express.static(avatarStaticDir, {
     etag: true,
     lastModified: true,
     maxAge: "24h",
@@ -1278,30 +1471,60 @@ app.get("/api/skills", (req, res) => {
   });
 });
 
-app.get("/api/avatars/random", (req, res) => {
-  const files = loadAvatarCatalog();
-  if (files.length === 0) {
+app.get("/api/avatars/random", async (req, res) => {
+  try {
+    const { files, source, client } = await loadAvatarCatalog();
+    if (files.length === 0) {
+      const avatar = createGeneratedAvatar();
+      return res.json({
+        avatar,
+        total: 0,
+        fallback: true,
+        source: "generated",
+      });
+    }
+
+    const index = Math.floor(Math.random() * files.length);
+    const relativePath = files[index];
+    let url = "";
+
+    if (source === "supabase") {
+      url = await resolveSupabaseAvatarUrl(client, relativePath);
+    } else {
+      const encodedPath = encodePathSegments(relativePath);
+      url = `/avatars/${encodedPath}`;
+    }
+
+    if (!url) {
+      const avatar = createGeneratedAvatar();
+      return res.json({
+        avatar,
+        total: files.length,
+        fallback: true,
+        source: "generated",
+      });
+    }
+
+    return res.json({
+      avatar: {
+        path: relativePath,
+        name: path.posix.basename(relativePath),
+        url,
+      },
+      total: files.length,
+      fallback: false,
+      source,
+    });
+  } catch (error) {
+    console.error("[avatar] random avatar failed:", error.message);
     const avatar = createGeneratedAvatar();
     return res.json({
       avatar,
       total: 0,
       fallback: true,
+      source: "generated",
     });
   }
-
-  const index = Math.floor(Math.random() * files.length);
-  const relativePath = files[index];
-  const encodedPath = encodePathSegments(relativePath);
-
-  return res.json({
-    avatar: {
-      path: relativePath,
-      name: path.posix.basename(relativePath),
-      url: `/avatars/${encodedPath}`,
-    },
-    total: files.length,
-    fallback: false,
-  });
 });
 
 app.get("/api/ontology/fields", async (req, res, next) => {

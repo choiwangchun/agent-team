@@ -84,6 +84,28 @@ npm run start
 - `AUTH_BOOTSTRAP_ROLE` (기본 `owner`)
 - `LOGIN_WINDOW_MS` (기본 60000)
 - `LOGIN_MAX_ATTEMPTS` (기본 5)
+- `SUPABASE_URL` (아바타 Storage 사용 시)
+- `SUPABASE_SERVICE_ROLE_KEY` (아바타 Storage 사용 시)
+- `SUPABASE_AVATAR_BUCKET` (기본 `avatars`)
+- `SUPABASE_AVATAR_PREFIX` (선택, 기본 루트)
+- `SUPABASE_AVATAR_PUBLIC` (기본 `true`)
+- `SUPABASE_AVATAR_SIGNED_URL_EXPIRES_SEC` (기본 3600, private bucket용)
+- `SUPABASE_AVATAR_MAX_FILES` (기본 5000, 랜덤 카탈로그 스캔 상한)
+
+### 아바타 저장소 전환 (Supabase Storage)
+
+- `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`가 설정되면 `/api/avatars/random`은 Supabase bucket을 우선 사용합니다.
+- Supabase에 아바타를 업로드하려면:
+
+```bash
+npm run sync:avatars
+```
+
+- 기본 업로드 소스 폴더는 `./avatars`이고, 다른 경로를 쓰려면:
+
+```bash
+npm run sync:avatars -- ./my-avatar-dir
+```
 
 ## Vercel 배포 가이드 (현재 구조 기준)
 
