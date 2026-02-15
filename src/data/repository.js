@@ -22,6 +22,10 @@ function normalizeColumnName(value) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function toJobResponse(row) {
   if (!row) {
     return null;
@@ -41,6 +45,40 @@ function toJobResponse(row) {
   };
 }
 
+function toUserResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    email: row.email,
+    passwordHash: row.password_hash ?? row.passwordHash,
+    name: row.name,
+    role: row.role,
+    status: row.status ?? "active",
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+  };
+}
+
+function toRefreshTokenResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.user_id ?? row.userId,
+    tokenHash: row.token_hash ?? row.tokenHash,
+    expiresAt: row.expires_at ?? row.expiresAt,
+    revokedAt: row.revoked_at ?? row.revokedAt ?? null,
+    userAgent: row.user_agent ?? row.userAgent ?? null,
+    ipAddress: row.ip_address ?? row.ipAddress ?? null,
+    createdAt: row.created_at ?? row.createdAt,
+  };
+}
+
 class InMemoryRepository {
   constructor() {
     this.ontologyFields = new Map();
@@ -49,12 +87,127 @@ class InMemoryRepository {
     this.jobs = new Map();
     this.agents = new Map();
     this.deployments = new Map();
+    this.users = new Map();
+    this.userIdsByEmail = new Map();
+    this.refreshTokens = new Map();
   }
 
   async init() {}
 
   type() {
     return "memory";
+  }
+
+  async createUser({ email, passwordHash, name, role, status = "active" }) {
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail) {
+      throw new Error("email is required");
+    }
+    if (this.userIdsByEmail.has(normalizedEmail)) {
+      throw new Error("email already exists");
+    }
+
+    const now = new Date().toISOString();
+    const user = {
+      id: crypto.randomUUID(),
+      email: normalizedEmail,
+      passwordHash: String(passwordHash || ""),
+      name: String(name || "").trim() || normalizedEmail,
+      role: String(role || "viewer").trim() || "viewer",
+      status: String(status || "active").trim() || "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.users.set(user.id, user);
+    this.userIdsByEmail.set(normalizedEmail, user.id);
+    return deepClone(user);
+  }
+
+  async findUserByEmail(email) {
+    const normalizedEmail = normalizeEmail(email);
+    const userId = this.userIdsByEmail.get(normalizedEmail);
+    if (!userId) {
+      return null;
+    }
+    return this.getUserById(userId);
+  }
+
+  async getUserById(userId) {
+    const user = this.users.get(String(userId || ""));
+    return user ? deepClone(user) : null;
+  }
+
+  async listUsers(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const users = Array.from(this.users.values()).sort((a, b) => {
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    return users.slice(0, safeLimit).map((user) => deepClone(user));
+  }
+
+  async updateUser(userId, { role, status }) {
+    const key = String(userId || "");
+    const current = this.users.get(key);
+    if (!current) {
+      return null;
+    }
+
+    const next = {
+      ...current,
+      role: role !== undefined ? String(role || "").trim() || current.role : current.role,
+      status: status !== undefined ? String(status || "").trim() || current.status : current.status,
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.users.set(key, next);
+    return deepClone(next);
+  }
+
+  async storeRefreshToken({ userId, tokenHash, expiresAt, userAgent = null, ipAddress = null }) {
+    const record = {
+      id: crypto.randomUUID(),
+      userId: String(userId || ""),
+      tokenHash: String(tokenHash || ""),
+      expiresAt: new Date(expiresAt).toISOString(),
+      revokedAt: null,
+      userAgent: userAgent ? String(userAgent) : null,
+      ipAddress: ipAddress ? String(ipAddress) : null,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.refreshTokens.set(record.tokenHash, record);
+    return deepClone(record);
+  }
+
+  async findRefreshTokenByHash(tokenHash) {
+    const record = this.refreshTokens.get(String(tokenHash || ""));
+    return record ? deepClone(record) : null;
+  }
+
+  async revokeRefreshTokenByHash(tokenHash) {
+    const key = String(tokenHash || "");
+    const record = this.refreshTokens.get(key);
+    if (!record) {
+      return null;
+    }
+    record.revokedAt = new Date().toISOString();
+    this.refreshTokens.set(key, record);
+    return deepClone(record);
+  }
+
+  async revokeRefreshTokensByUser(userId) {
+    const key = String(userId || "");
+    let revokedCount = 0;
+    for (const [tokenHash, record] of this.refreshTokens.entries()) {
+      if (record.userId !== key || record.revokedAt) {
+        continue;
+      }
+      record.revokedAt = new Date().toISOString();
+      this.refreshTokens.set(tokenHash, record);
+      revokedCount += 1;
+    }
+    return { revokedCount };
   }
 
   async listOntologyFields() {
@@ -400,6 +553,32 @@ class PostgresRepository {
         updated_at TIMESTAMPTZ NOT NULL
       );
     `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS app_users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS auth_refresh_tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        user_agent TEXT,
+        ip_address TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+    `);
   }
 
   async listOntologyFields() {
@@ -501,6 +680,175 @@ class PostgresRepository {
       createdAt: rows[0].created_at,
       updatedAt: rows[0].updated_at,
     };
+  }
+
+  async createUser({ email, passwordHash, name, role, status = "active" }) {
+    const id = crypto.randomUUID();
+    const normalizedEmail = normalizeEmail(email);
+    const now = new Date().toISOString();
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO app_users (id, email, password_hash, name, role, status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $7::timestamptz)
+      RETURNING id, email, password_hash, name, role, status, created_at, updated_at
+      `,
+      [
+        id,
+        normalizedEmail,
+        String(passwordHash || ""),
+        String(name || "").trim() || normalizedEmail,
+        String(role || "viewer").trim() || "viewer",
+        String(status || "active").trim() || "active",
+        now,
+      ]
+    );
+
+    return toUserResponse(rows[0]);
+  }
+
+  async findUserByEmail(email) {
+    const normalizedEmail = normalizeEmail(email);
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, email, password_hash, name, role, status, created_at, updated_at
+      FROM app_users
+      WHERE email = $1
+      LIMIT 1
+      `,
+      [normalizedEmail]
+    );
+
+    return rows.length > 0 ? toUserResponse(rows[0]) : null;
+  }
+
+  async getUserById(userId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, email, password_hash, name, role, status, created_at, updated_at
+      FROM app_users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [String(userId || "")]
+    );
+
+    return rows.length > 0 ? toUserResponse(rows[0]) : null;
+  }
+
+  async listUsers(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, email, password_hash, name, role, status, created_at, updated_at
+      FROM app_users
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+
+    return rows.map((row) => toUserResponse(row));
+  }
+
+  async updateUser(userId, { role, status }) {
+    const updates = [];
+    const values = [String(userId || "")];
+    let index = 2;
+
+    if (role !== undefined) {
+      updates.push(`role = $${index++}`);
+      values.push(String(role || "").trim());
+    }
+
+    if (status !== undefined) {
+      updates.push(`status = $${index++}`);
+      values.push(String(status || "").trim());
+    }
+
+    if (updates.length === 0) {
+      return this.getUserById(userId);
+    }
+
+    updates.push("updated_at = NOW()");
+
+    const { rows } = await this.pool.query(
+      `
+      UPDATE app_users
+      SET ${updates.join(", ")}
+      WHERE id = $1
+      RETURNING id, email, password_hash, name, role, status, created_at, updated_at
+      `,
+      values
+    );
+
+    return rows.length > 0 ? toUserResponse(rows[0]) : null;
+  }
+
+  async storeRefreshToken({ userId, tokenHash, expiresAt, userAgent = null, ipAddress = null }) {
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO auth_refresh_tokens (
+        id, user_id, token_hash, expires_at, revoked_at, user_agent, ip_address, created_at
+      )
+      VALUES ($1, $2, $3, $4::timestamptz, NULL, $5, $6, $7::timestamptz)
+      RETURNING id, user_id, token_hash, expires_at, revoked_at, user_agent, ip_address, created_at
+      `,
+      [
+        id,
+        String(userId || ""),
+        String(tokenHash || ""),
+        new Date(expiresAt).toISOString(),
+        userAgent ? String(userAgent) : null,
+        ipAddress ? String(ipAddress) : null,
+        createdAt,
+      ]
+    );
+
+    return toRefreshTokenResponse(rows[0]);
+  }
+
+  async findRefreshTokenByHash(tokenHash) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, user_id, token_hash, expires_at, revoked_at, user_agent, ip_address, created_at
+      FROM auth_refresh_tokens
+      WHERE token_hash = $1
+      LIMIT 1
+      `,
+      [String(tokenHash || "")]
+    );
+
+    return rows.length > 0 ? toRefreshTokenResponse(rows[0]) : null;
+  }
+
+  async revokeRefreshTokenByHash(tokenHash) {
+    const { rows } = await this.pool.query(
+      `
+      UPDATE auth_refresh_tokens
+      SET revoked_at = NOW()
+      WHERE token_hash = $1
+      RETURNING id, user_id, token_hash, expires_at, revoked_at, user_agent, ip_address, created_at
+      `,
+      [String(tokenHash || "")]
+    );
+
+    return rows.length > 0 ? toRefreshTokenResponse(rows[0]) : null;
+  }
+
+  async revokeRefreshTokensByUser(userId) {
+    const { rowCount } = await this.pool.query(
+      `
+      UPDATE auth_refresh_tokens
+      SET revoked_at = NOW()
+      WHERE user_id = $1 AND revoked_at IS NULL
+      `,
+      [String(userId || "")]
+    );
+
+    return { revokedCount: Number(rowCount || 0) };
   }
 
   async createDataset(dataset) {

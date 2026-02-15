@@ -73,6 +73,17 @@ npm run start
 - `JOB_POLL_INTERVAL_MS` (기본 750)
 - `JOB_BATCH_SIZE` (기본 5)
 - `MICROCACHE_TTL_MS` (선택)
+- `JWT_ACCESS_SECRET` (운영 필수)
+- `JWT_REFRESH_SECRET` (운영 필수)
+- `ACCESS_TOKEN_TTL_SEC` (기본 900초)
+- `REFRESH_TOKEN_TTL_SEC` (기본 1209600초, 14일)
+- `AUTH_COOKIE_DOMAIN` (선택)
+- `AUTH_BOOTSTRAP_EMAIL` (기본 `admin@agent.local`)
+- `AUTH_BOOTSTRAP_PASSWORD` (개발 기본 `admin1234!`, 운영은 직접 지정 권장)
+- `AUTH_BOOTSTRAP_NAME` (기본 `Owner`)
+- `AUTH_BOOTSTRAP_ROLE` (기본 `owner`)
+- `LOGIN_WINDOW_MS` (기본 60000)
+- `LOGIN_MAX_ATTEMPTS` (기본 5)
 
 ## Vercel 배포 가이드 (현재 구조 기준)
 
@@ -101,6 +112,16 @@ npm run start
 - `GET /ops/metrics`
 - `GET /api/system/storage`
 
+### Auth
+
+- `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+- `GET /api/auth/users` (admin/owner)
+- `POST /api/auth/users` (admin/owner)
+- `PATCH /api/auth/users/:userId` (admin/owner)
+
 ### Ontology
 
 - `GET /api/ontology/fields`
@@ -122,10 +143,10 @@ npm run start
 
 - `GET /api/agents`
 - `GET /api/agents/:agentId`
-- `POST /api/agents`
+- `POST /api/agents` (operator/admin/owner)
 - `GET /api/deployments`
-- `POST /api/deployments`
-- `PATCH /api/deployments/:deploymentId/scale`
+- `POST /api/deployments` (operator/admin/owner)
+- `PATCH /api/deployments/:deploymentId/scale` (operator/admin/owner)
 
 자세한 스펙은 아래 문서를 참고하세요.
 

@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/css/tailwind.css?v=<%= assetVersion %>" />
   </head>
   <body class="min-h-screen bg-gradient-to-br from-[#e8f7ff] via-[#f8fbff] to-[#fff3ed]">
-    <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <div id="appShell" class="mx-auto hidden max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <div class="grid gap-6 lg:grid-cols-[280px,1fr]">
         <aside
           class="flex flex-col rounded-3xl border border-white/70 bg-white/90 p-5 shadow-soft backdrop-blur lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:overflow-y-auto"
@@ -64,7 +64,14 @@
 
           <div class="mt-auto rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
             <p class="text-xs text-slate-500">Signed in as</p>
-            <p class="font-semibold text-slate-900"><%= user.name %> (<%= user.role %>)</p>
+            <p id="signedInUser" class="font-semibold text-slate-900"><%= user.name %> (<%= user.role %>)</p>
+            <button
+              id="logoutBtn"
+              type="button"
+              class="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+            >
+              로그아웃
+            </button>
           </div>
         </aside>
 
@@ -390,11 +397,66 @@
       </div>
     </div>
 
+    <div id="authGate" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/20 px-4 py-8 backdrop-blur">
+      <div class="w-full max-w-md rounded-3xl border border-white/70 bg-white p-6 shadow-soft">
+        <h1 class="font-display text-xl font-semibold text-slate-900">로그인</h1>
+        <p class="mt-1 text-sm text-slate-500">Agent Workspace를 사용하려면 로그인하세요.</p>
+
+        <div id="authNotice" class="mt-4 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+          세션을 확인하는 중입니다.
+        </div>
+
+        <form id="loginForm" class="mt-4 space-y-3">
+          <label class="block text-sm">
+            <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Email</span>
+            <input
+              id="loginEmail"
+              type="email"
+              autocomplete="username"
+              value="admin@agent.local"
+              class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+              required
+            />
+          </label>
+
+          <label class="block text-sm">
+            <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Password</span>
+            <input
+              id="loginPassword"
+              type="password"
+              autocomplete="current-password"
+              class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+              required
+            />
+          </label>
+
+          <button
+            id="loginSubmitBtn"
+            type="submit"
+            class="w-full rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            로그인
+          </button>
+        </form>
+      </div>
+    </div>
+
     <script>
       (() => {
         const buttons = Array.from(document.querySelectorAll('.tab-btn'));
         const panels = Array.from(document.querySelectorAll('.tab-panel'));
         const inactiveClasses = ['text-slate-700', 'hover:bg-slate-100', 'hover:text-slate-900'];
+        const appShell = document.getElementById('appShell');
+        const auth = {
+          gate: document.getElementById('authGate'),
+          notice: document.getElementById('authNotice'),
+          form: document.getElementById('loginForm'),
+          email: document.getElementById('loginEmail'),
+          password: document.getElementById('loginPassword'),
+          submitBtn: document.getElementById('loginSubmitBtn'),
+          signedInUser: document.getElementById('signedInUser'),
+          logoutBtn: document.getElementById('logoutBtn'),
+        };
 
         function setTab(nextTab, pushHash = true) {
           buttons.forEach((button) => {
@@ -454,8 +516,21 @@
           });
         }
 
+        function handleAuthRequired(message = '로그인이 필요합니다.') {
+          state.auth.user = null;
+          updateSignedInUser(null);
+          showAuthGate(message, 'info');
+        }
+
         async function requestJson(url, options = {}) {
-          const response = await fetch(url, options);
+          const {
+            suppressAuthRedirect = false,
+            ...fetchOptions
+          } = options || {};
+          const response = await fetch(url, {
+            credentials: 'same-origin',
+            ...fetchOptions,
+          });
           const text = await response.text();
           let data = {};
           try {
@@ -466,7 +541,13 @@
 
           if (!response.ok) {
             const message = data.message || data.error || `request failed: ${response.status}`;
-            throw new Error(message);
+            const error = new Error(message);
+            error.status = response.status;
+            error.payload = data;
+            if (response.status === 401 && !suppressAuthRedirect) {
+              handleAuthRequired(message);
+            }
+            throw error;
           }
 
           return data;
@@ -486,6 +567,109 @@
           el.classList.remove('hidden');
         }
 
+        function setAuthNotice(message, type = 'info') {
+          if (!auth.notice) {
+            return;
+          }
+          const styles = {
+            info: 'border-sky-200 bg-sky-50 text-sky-800',
+            success: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+            error: 'border-rose-200 bg-rose-50 text-rose-800',
+          };
+          auth.notice.className = `mt-4 rounded-xl border px-3 py-2 text-sm ${styles[type] || styles.info}`;
+          auth.notice.textContent = message;
+        }
+
+        function updateSignedInUser(user) {
+          if (!auth.signedInUser) {
+            return;
+          }
+          if (!user) {
+            auth.signedInUser.textContent = '-';
+            return;
+          }
+          const name = String(user.name || user.email || 'User');
+          const role = String(user.role || 'viewer');
+          auth.signedInUser.textContent = `${name} (${role})`;
+        }
+
+        function setAuthFormBusy(isBusy) {
+          state.auth.loginBusy = Boolean(isBusy);
+          const now = Date.now();
+          const lockRemainingSec = Math.max(0, Math.ceil((state.auth.lockUntilMs - now) / 1000));
+          const isLocked = lockRemainingSec > 0;
+
+          if (auth.submitBtn) {
+            auth.submitBtn.disabled = Boolean(isBusy) || isLocked;
+            auth.submitBtn.classList.toggle('opacity-60', Boolean(isBusy) || isLocked);
+            auth.submitBtn.textContent = isBusy
+              ? '로그인 중...'
+              : isLocked
+                ? `잠금 ${lockRemainingSec}s`
+                : '로그인';
+          }
+          if (auth.email) {
+            auth.email.disabled = isBusy;
+          }
+          if (auth.password) {
+            auth.password.disabled = isBusy;
+          }
+        }
+
+        function showAppShell() {
+          appShell?.classList.remove('hidden');
+          auth.gate?.classList.add('hidden');
+        }
+
+        function showAuthGate(message = '로그인이 필요합니다.', type = 'info') {
+          setAuthNotice(message, type);
+          auth.gate?.classList.remove('hidden');
+          appShell?.classList.add('hidden');
+          stopPolling();
+          setAuthFormBusy(state.auth.loginBusy);
+        }
+
+        function stopLoginLockTimer() {
+          if (!state.auth.lockTimer) {
+            return;
+          }
+          clearInterval(state.auth.lockTimer);
+          state.auth.lockTimer = null;
+        }
+
+        function clearLoginLockState() {
+          state.auth.lockUntilMs = 0;
+          stopLoginLockTimer();
+          setAuthFormBusy(state.auth.loginBusy);
+        }
+
+        function startLoginLockState(retryAfterSec, maxAttempts) {
+          const safeRetryAfterSec = Math.max(1, Number(retryAfterSec) || 1);
+          state.auth.lockUntilMs = Date.now() + safeRetryAfterSec * 1000;
+          stopLoginLockTimer();
+          setAuthFormBusy(state.auth.loginBusy);
+
+          const updateLockMessage = () => {
+            const remainingSec = Math.max(
+              0,
+              Math.ceil((state.auth.lockUntilMs - Date.now()) / 1000)
+            );
+            if (remainingSec <= 0) {
+              clearLoginLockState();
+              setAuthNotice('로그인을 다시 시도할 수 있습니다.', 'info');
+              return;
+            }
+            const attemptsText = Number.isFinite(Number(maxAttempts))
+              ? `최대 ${Number(maxAttempts)}회 초과`
+              : '로그인 시도 초과';
+            setAuthNotice(`${attemptsText}로 ${remainingSec}초 동안 잠금 상태입니다.`, 'error');
+            setAuthFormBusy(state.auth.loginBusy);
+          };
+
+          updateLockMessage();
+          state.auth.lockTimer = setInterval(updateLockMessage, 1000);
+        }
+
         function parseCsvLine(value) {
           return String(value || '')
             .split(',')
@@ -502,6 +686,12 @@
         }
 
         const state = {
+          auth: {
+            user: null,
+            loginBusy: false,
+            lockUntilMs: 0,
+            lockTimer: null,
+          },
           agents: [],
           skills: [],
           selectedAvatar: null,
@@ -2208,25 +2398,156 @@
           }
         }
 
+        function startPolling() {
+          if (pollTimer) {
+            return;
+          }
+          pollTimer = setInterval(() => {
+            Promise.all([refreshAgents()]).catch(() => {});
+          }, 2500);
+        }
+
+        function stopPolling() {
+          if (!pollTimer) {
+            return;
+          }
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+
+        async function refreshMe() {
+          const response = await requestJson('/api/auth/me', {
+            suppressAuthRedirect: true,
+          });
+          state.auth.user = response?.user || null;
+          updateSignedInUser(state.auth.user);
+          return state.auth.user;
+        }
+
+        async function handleLoginSubmit(event) {
+          event.preventDefault();
+          const lockRemainingSec = Math.max(
+            0,
+            Math.ceil((state.auth.lockUntilMs - Date.now()) / 1000)
+          );
+          if (lockRemainingSec > 0) {
+            setAuthNotice(`로그인 시도 제한 상태입니다. ${lockRemainingSec}초 후 다시 시도하세요.`, 'error');
+            setAuthFormBusy(false);
+            return;
+          }
+
+          const email = String(auth.email?.value || '').trim();
+          const password = String(auth.password?.value || '');
+          if (!email || !password) {
+            setAuthNotice('이메일과 비밀번호를 입력하세요.', 'error');
+            return;
+          }
+
+          setAuthFormBusy(true);
+          setAuthNotice('로그인 중입니다...', 'info');
+          try {
+            const response = await requestJson('/api/auth/login', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ email, password }),
+              suppressAuthRedirect: true,
+            });
+            clearLoginLockState();
+            state.auth.user = response?.user || null;
+            updateSignedInUser(state.auth.user);
+            showAppShell();
+            setAuthNotice('로그인 성공', 'success');
+            if (auth.password) {
+              auth.password.value = '';
+            }
+            await Promise.all([refreshAgents(), refreshSkills(), drawRandomAvatar()]);
+            startPolling();
+          } catch (error) {
+            if (error.status === 429) {
+              const retryAfterSec = Number(error.payload?.retryAfterSec || 0);
+              const maxAttempts = Number(error.payload?.maxAttempts || 0);
+              startLoginLockState(retryAfterSec, maxAttempts);
+            } else if (error.status === 401) {
+              const attemptsRemaining = Number(error.payload?.attemptsRemaining);
+              const maxAttempts = Number(error.payload?.maxAttempts);
+              if (Number.isFinite(attemptsRemaining) && Number.isFinite(maxAttempts)) {
+                setAuthNotice(
+                  `로그인 실패: ${error.message} (남은 시도 ${attemptsRemaining}/${maxAttempts})`,
+                  'error'
+                );
+              } else {
+                setAuthNotice(`로그인 실패: ${error.message}`, 'error');
+              }
+            } else {
+              setAuthNotice(`로그인 실패: ${error.message}`, 'error');
+            }
+          } finally {
+            setAuthFormBusy(false);
+          }
+        }
+
+        async function handleLogout() {
+          setActionButtonsDisabled(true);
+          try {
+            await requestJson('/api/auth/logout', {
+              method: 'POST',
+              suppressAuthRedirect: true,
+            });
+          } catch {
+            // ignore logout errors and force local session reset
+          } finally {
+            state.auth.user = null;
+            updateSignedInUser(null);
+            clearLoginLockState();
+            setActionButtonsDisabled(false);
+            showAuthGate('로그아웃되었습니다.', 'info');
+          }
+        }
+
+        let initializedPanels = false;
+        function initializePanelsOnce() {
+          if (initializedPanels) {
+            return;
+          }
+          initializeDataProcessingPanel();
+          initializeDeploymentStudio();
+          initializedPanels = true;
+        }
+
+        async function bootstrapAuthAndApp() {
+          initializePanelsOnce();
+          auth.form?.addEventListener('submit', handleLoginSubmit);
+          auth.logoutBtn?.addEventListener('click', handleLogout);
+          setAuthFormBusy(false);
+
+          try {
+            setAuthNotice('세션을 확인하는 중입니다.', 'info');
+            const user = await refreshMe();
+            if (user) {
+              showAppShell();
+              await Promise.all([refreshAgents(), refreshSkills(), drawRandomAvatar()]);
+              startPolling();
+              return;
+            }
+          } catch {
+            // session not found
+          }
+
+          showAuthGate('로그인이 필요합니다.', 'info');
+        }
+
         ac.clearSkillsBtn?.addEventListener('click', clearSelectedSkills);
         ac.rerollAvatarBtn?.addEventListener('click', drawRandomAvatar);
         ac.createBtn?.addEventListener('click', createAgent);
 
-        initializeDataProcessingPanel();
-        initializeDeploymentStudio();
-
-        Promise.all([refreshAgents(), refreshSkills(), drawRandomAvatar()]).catch((error) => {
-          console.error('initial refresh failed', error);
+        bootstrapAuthAndApp().catch((error) => {
+          console.error('auth bootstrap failed', error);
+          showAuthGate(`초기화 실패: ${error.message}`, 'error');
         });
 
-        pollTimer = setInterval(() => {
-          Promise.all([refreshAgents()]).catch(() => {});
-        }, 2500);
-
         window.addEventListener('beforeunload', () => {
-          if (pollTimer) {
-            clearInterval(pollTimer);
-          }
+          stopPolling();
+          stopLoginLockTimer();
         });
       })();
 
