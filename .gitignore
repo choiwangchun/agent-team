@@ -1,5 +1,6 @@
 node_modules/
 avatars/
+.cache/
 .DS_Store
 .env
 .env*.tmp

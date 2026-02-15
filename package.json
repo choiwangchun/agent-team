@@ -9,7 +9,9 @@
     "start": "npm run build:css && node server.js",
     "dev": "npm run build:css && (npm run watch:css & node --watch server.js)",
     "perf:bench": "bash ./scripts/perf-benchmark.sh",
-    "sync:avatars": "node scripts/sync-avatars-to-supabase.js"
+    "sync:avatars": "node scripts/sync-avatars-to-supabase.js",
+    "prepare:avatars:subset": "node scripts/prepare-avatar-subset.js",
+    "sync:avatars:subset": "npm run prepare:avatars:subset && npm run sync:avatars -- .cache/avatar-subset"
   },
   "keywords": [],
   "author": "",

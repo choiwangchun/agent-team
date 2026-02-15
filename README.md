@@ -107,6 +107,18 @@ npm run sync:avatars
 npm run sync:avatars -- ./my-avatar-dir
 ```
 
+- 무료 플랜(1GB)처럼 용량 제한이 필요하면, 먼저 서브셋을 만든 뒤 업로드:
+
+```bash
+AVATAR_SUBSET_MAX_MB=900 npm run sync:avatars:subset
+```
+
+- 서브셋 생성만 먼저 확인하려면:
+
+```bash
+AVATAR_SUBSET_MAX_MB=900 npm run prepare:avatars:subset
+```
+
 ## Vercel 배포 가이드 (현재 구조 기준)
 
 이 저장소는 서버리스 진입점이 이미 포함되어 있습니다.
