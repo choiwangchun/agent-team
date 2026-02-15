@@ -359,6 +359,44 @@ function loadAvatarCatalog() {
   return files;
 }
 
+function createGeneratedAvatar() {
+  const palettes = [
+    { bg: "#eff6ff", skin: "#fde68a", shirt: "#1f2937", hair: "#111827" },
+    { bg: "#f0fdf4", skin: "#fed7aa", shirt: "#0f766e", hair: "#1f2937" },
+    { bg: "#fff7ed", skin: "#fcd34d", shirt: "#7c2d12", hair: "#111827" },
+    { bg: "#f5f3ff", skin: "#f5d0fe", shirt: "#312e81", hair: "#27272a" },
+    { bg: "#fdf2f8", skin: "#fde68a", shirt: "#be185d", hair: "#111827" },
+  ];
+
+  const pick = palettes[Math.floor(Math.random() * palettes.length)];
+  const seed = crypto.randomBytes(4).toString("hex");
+  const eyeStyle = Math.floor(Math.random() * 3);
+  const eyes =
+    eyeStyle === 0
+      ? '<circle cx="104" cy="104" r="4.5" fill="#111827"/><circle cx="152" cy="104" r="4.5" fill="#111827"/>'
+      : eyeStyle === 1
+        ? '<rect x="99.5" y="100.5" width="9" height="6" rx="3" fill="#111827"/><rect x="147.5" y="100.5" width="9" height="6" rx="3" fill="#111827"/>'
+        : '<path d="M98 105q6-6 12 0" stroke="#111827" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M146 105q6-6 12 0" stroke="#111827" stroke-width="3" fill="none" stroke-linecap="round"/>';
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" fill="${pick.bg}" />
+  <circle cx="128" cy="112" r="52" fill="${pick.skin}" />
+  <path d="M76 104c0-36 24-60 52-60s52 24 52 60c-12-14-32-24-52-24s-40 10-52 24z" fill="${pick.hair}" />
+  ${eyes}
+  <path d="M110 132q18 14 36 0" stroke="#92400e" stroke-width="4" fill="none" stroke-linecap="round" />
+  <path d="M54 232c0-44 33-74 74-74s74 30 74 74" fill="${pick.shirt}" />
+</svg>
+  `.trim();
+
+  return {
+    path: `generated/${seed}.svg`,
+    name: `generated-${seed}.svg`,
+    url: `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`,
+    generated: true,
+  };
+}
+
 function listAvailableSkills() {
   const skills = [];
   const seen = new Set();
@@ -1243,9 +1281,11 @@ app.get("/api/skills", (req, res) => {
 app.get("/api/avatars/random", (req, res) => {
   const files = loadAvatarCatalog();
   if (files.length === 0) {
-    return res.status(404).json({
-      error: "avatar_not_found",
-      message: "No SVG avatar files were found in avatars/ directory.",
+    const avatar = createGeneratedAvatar();
+    return res.json({
+      avatar,
+      total: 0,
+      fallback: true,
     });
   }
 
@@ -1260,6 +1300,7 @@ app.get("/api/avatars/random", (req, res) => {
       url: `/avatars/${encodedPath}`,
     },
     total: files.length,
+    fallback: false,
   });
 });
 
