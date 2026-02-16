@@ -1,4 +1,5 @@
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
@@ -82,6 +83,47 @@ const SUPABASE_AVATAR_MAX_FILES = Math.max(
   100,
   Number(process.env.SUPABASE_AVATAR_MAX_FILES || 5000)
 );
+const PROVIDER_AUTH_FETCH_TIMEOUT_MS = Math.max(
+  2000,
+  Number(process.env.PROVIDER_AUTH_FETCH_TIMEOUT_MS || 12000)
+);
+const PROVIDER_AUTH_MODELS_LIMIT = Math.max(
+  5,
+  Number(process.env.PROVIDER_AUTH_MODELS_LIMIT || 120)
+);
+const PROVIDER_OAUTH_CHALLENGE_TTL_SEC = Math.max(
+  120,
+  Number(process.env.PROVIDER_OAUTH_CHALLENGE_TTL_SEC || 10 * 60)
+);
+const PROVIDER_AUTH_ENCRYPTION_SECRET = String(
+  process.env.PROVIDER_AUTH_ENCRYPTION_SECRET ||
+    process.env.JWT_REFRESH_SECRET ||
+    process.env.JWT_ACCESS_SECRET ||
+    ""
+).trim();
+const OPENAI_CODEX_OAUTH_CLIENT_ID = String(
+  process.env.OPENAI_CODEX_OAUTH_CLIENT_ID || "app_EMoamEEZ73f0CkXaXp7hrann"
+).trim();
+const OPENAI_CODEX_OAUTH_AUTHORIZE_URL = String(
+  process.env.OPENAI_CODEX_OAUTH_AUTHORIZE_URL ||
+    "https://auth.openai.com/oauth/authorize"
+).trim();
+const OPENAI_CODEX_OAUTH_TOKEN_URL = String(
+  process.env.OPENAI_CODEX_OAUTH_TOKEN_URL ||
+    "https://auth.openai.com/oauth/token"
+).trim();
+const OPENAI_CODEX_OAUTH_REDIRECT_URI = String(
+  process.env.OPENAI_CODEX_OAUTH_REDIRECT_URI ||
+    "http://localhost:1455/auth/callback"
+).trim();
+const OPENAI_CODEX_OAUTH_SCOPE = String(
+  process.env.OPENAI_CODEX_OAUTH_SCOPE ||
+    "openid profile email offline_access"
+).trim();
+const OPENAI_CODEX_ACCOUNT_CLAIM_PATH = "https://api.openai.com/auth";
+const OAUTH_CALLBACK_BRIDGE_ENABLED = String(
+  process.env.OAUTH_CALLBACK_BRIDGE_ENABLED || "true"
+).trim().toLowerCase() !== "false";
 const MB = 1024 * 1024;
 
 const repository = createRepository();
@@ -137,6 +179,45 @@ const skillSourceRoots = [
   path.join(process.env.HOME || "", ".codex/skills"),
   path.join(process.env.HOME || "", ".agents/skills"),
 ];
+const providerAuthTemplates = Object.freeze([
+  Object.freeze({
+    provider: "openai",
+    label: "OPEN AI",
+    description:
+      "OpenAI Codex OAuth(Auth)로 연결해 ChatGPT/Codex 계열 모델을 사용합니다.",
+    authMode: "oauth",
+  }),
+  Object.freeze({
+    provider: "google",
+    label: "GOOGLE",
+    description: "Google Gemini API key를 연결해 Gemini 모델을 사용합니다.",
+    authMode: "api_key",
+  }),
+]);
+const openaiCodexModelCatalog = Object.freeze([
+  Object.freeze({ provider: "openai-codex", id: "gpt-5.3-codex", label: "gpt-5.3-codex" }),
+  Object.freeze({
+    provider: "openai-codex",
+    id: "gpt-5.3-codex-spark",
+    label: "gpt-5.3-codex-spark",
+  }),
+  Object.freeze({ provider: "openai-codex", id: "gpt-5.2-codex", label: "gpt-5.2-codex" }),
+  Object.freeze({ provider: "openai-codex", id: "gpt-5.2", label: "gpt-5.2" }),
+  Object.freeze({
+    provider: "openai-codex",
+    id: "gpt-5.1-codex-max",
+    label: "gpt-5.1-codex-max",
+  }),
+  Object.freeze({
+    provider: "openai-codex",
+    id: "gpt-5.1-codex-mini",
+    label: "gpt-5.1-codex-mini",
+  }),
+  Object.freeze({ provider: "openai-codex", id: "gpt-5.1", label: "gpt-5.1" }),
+]);
+const providerAuthTemplateById = new Map(
+  providerAuthTemplates.map((item) => [item.provider, item])
+);
 
 const routeCache = new Map();
 const useRouteCache = isProduction && MICROCACHE_TTL_MS > 0;
@@ -150,8 +231,11 @@ let initialized = false;
 let initPromise = null;
 let queueStarted = false;
 let httpServer = null;
+let oauthCallbackBridgeServer = null;
+let oauthCallbackBridgeAttempted = false;
 let shutdownHooksRegistered = false;
 const loginAttempts = new Map();
+const oauthChallengesByState = new Map();
 
 eventLoopDelay.enable();
 app.disable("x-powered-by");
@@ -621,6 +705,995 @@ function listAvailableSkills() {
   return skills.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+function normalizeProviderId(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+}
+
+function getProviderTemplate(provider) {
+  return providerAuthTemplateById.get(normalizeProviderId(provider)) || null;
+}
+
+function resolveProviderLabel(provider) {
+  const template = getProviderTemplate(provider);
+  if (template?.label) {
+    return template.label;
+  }
+  const normalized = normalizeProviderId(provider);
+  if (!normalized) {
+    return "Unknown";
+  }
+  return normalized.toUpperCase();
+}
+
+function normalizeProviderModelEntry(provider, model) {
+  const providerOverride =
+    typeof model === "object" && model !== null ? model.provider : null;
+  const providerId = normalizeProviderId(providerOverride || provider);
+  if (!providerId) {
+    return null;
+  }
+
+  const modelIdRaw =
+    typeof model === "string"
+      ? model
+      : String(model?.id || model?.modelId || model?.name || "").trim();
+  const modelId = String(modelIdRaw || "")
+    .replace(/^models\//i, "")
+    .trim();
+  if (!modelId) {
+    return null;
+  }
+
+  const labelRaw =
+    typeof model === "object" && model !== null
+      ? String(model.label || model.displayName || model.name || modelId)
+      : modelId;
+  const label = labelRaw.trim() || modelId;
+  const value = `${providerId}/${modelId}`;
+
+  return {
+    provider: providerId,
+    modelId,
+    value,
+    label,
+  };
+}
+
+function normalizeProviderModels(provider, models) {
+  if (!Array.isArray(models) || models.length === 0) {
+    return [];
+  }
+
+  const dedupe = new Set();
+  const normalized = [];
+
+  for (const item of models) {
+    const entry = normalizeProviderModelEntry(provider, item);
+    if (!entry || dedupe.has(entry.value)) {
+      continue;
+    }
+    dedupe.add(entry.value);
+    normalized.push(entry);
+    if (normalized.length >= PROVIDER_AUTH_MODELS_LIMIT) {
+      break;
+    }
+  }
+
+  return normalized;
+}
+
+function toPublicProviderAuthConnection(connection) {
+  const provider = normalizeProviderId(connection?.provider);
+  const models = normalizeProviderModels(provider, connection?.models);
+  const statusRaw = String(connection?.status || "pending")
+    .trim()
+    .toLowerCase();
+  const status = ["connected", "pending", "error"].includes(statusRaw)
+    ? statusRaw
+    : "pending";
+
+  return {
+    id: connection?.id || null,
+    provider,
+    displayName: String(connection?.displayName || resolveProviderLabel(provider)).trim(),
+    authMode: String(connection?.authMode || "api_key").trim().toLowerCase() || "api_key",
+    status,
+    isAuthenticated: status === "connected",
+    modelCount: models.length,
+    models,
+    errorMessage: String(connection?.errorMessage || "").trim() || null,
+    lastCheckedAt: connection?.lastCheckedAt || null,
+    updatedAt: connection?.updatedAt || null,
+  };
+}
+
+function getModelCatalogFromConnections(connections) {
+  const dedupe = new Set();
+  const models = [
+    {
+      value: "Balanced (default)",
+      label: "Balanced (default)",
+      provider: "system",
+      modelId: "Balanced (default)",
+      source: "builtin",
+    },
+  ];
+  dedupe.add("Balanced (default)");
+
+  for (const connection of connections) {
+    if (!connection || connection.status !== "connected") {
+      continue;
+    }
+    const normalizedModels = normalizeProviderModels(
+      connection.provider,
+      connection.models
+    );
+    for (const model of normalizedModels) {
+      if (dedupe.has(model.value)) {
+        continue;
+      }
+      dedupe.add(model.value);
+      models.push({
+        ...model,
+        label: `${connection.displayName} / ${model.label}`,
+        source: "provider",
+      });
+    }
+  }
+
+  return models;
+}
+
+function getProviderAuthEncryptionKey() {
+  const seed =
+    PROVIDER_AUTH_ENCRYPTION_SECRET ||
+    `${JWT_ACCESS_SECRET}:${JWT_REFRESH_SECRET}`;
+  return crypto.createHash("sha256").update(seed).digest();
+}
+
+function encryptProviderSecret(secret) {
+  const normalized = String(secret || "").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv(
+    "aes-256-gcm",
+    getProviderAuthEncryptionKey(),
+    iv
+  );
+  const encrypted = Buffer.concat([
+    cipher.update(normalized, "utf8"),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+  return `v1:${iv.toString("base64")}:${authTag.toString(
+    "base64"
+  )}:${encrypted.toString("base64")}`;
+}
+
+function toBase64Url(input) {
+  if (input === null || input === undefined) {
+    return "";
+  }
+  const source = Buffer.isBuffer(input)
+    ? input
+    : Buffer.from(String(input), "utf8");
+  return source.toString("base64url");
+}
+
+function fromBase64Url(value) {
+  return Buffer.from(String(value || ""), "base64url");
+}
+
+function signOAuthChallengePayload(payloadEncoded) {
+  return toBase64Url(
+    crypto
+      .createHmac("sha256", getProviderAuthEncryptionKey())
+      .update(String(payloadEncoded || ""))
+      .digest()
+  );
+}
+
+function createOAuthChallengeToken(payload) {
+  const body = toBase64Url(JSON.stringify(payload || {}));
+  const signature = signOAuthChallengePayload(body);
+  return `${body}.${signature}`;
+}
+
+function parseOAuthChallengeToken(token) {
+  const raw = String(token || "").trim();
+  if (!raw) {
+    throw new Error("challengeToken is required");
+  }
+
+  const [body, signature] = raw.split(".");
+  if (!body || !signature) {
+    throw new Error("invalid challenge token");
+  }
+
+  const expected = signOAuthChallengePayload(body);
+  const providedBuffer = fromBase64Url(signature);
+  const expectedBuffer = fromBase64Url(expected);
+  if (
+    providedBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(providedBuffer, expectedBuffer)
+  ) {
+    throw new Error("invalid challenge token signature");
+  }
+
+  let payload = {};
+  try {
+    payload = JSON.parse(fromBase64Url(body).toString("utf8"));
+  } catch {
+    throw new Error("invalid challenge token payload");
+  }
+
+  const expiresAt = Number(payload?.exp || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error("challenge token expired");
+  }
+
+  return payload;
+}
+
+function generatePkcePair() {
+  const verifier = toBase64Url(crypto.randomBytes(32));
+  const challenge = toBase64Url(
+    crypto.createHash("sha256").update(verifier).digest()
+  );
+  return { verifier, challenge };
+}
+
+function parseAuthorizationInput(input) {
+  const value = String(input || "").trim();
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const url = new URL(value);
+    return {
+      code: url.searchParams.get("code") || undefined,
+      state: url.searchParams.get("state") || undefined,
+    };
+  } catch {
+    // not a URL
+  }
+
+  if (value.includes("#")) {
+    const [code, state] = value.split("#", 2);
+    return {
+      code: String(code || "").trim() || undefined,
+      state: String(state || "").trim() || undefined,
+    };
+  }
+
+  if (value.includes("code=")) {
+    const params = new URLSearchParams(value);
+    return {
+      code: params.get("code") || undefined,
+      state: params.get("state") || undefined,
+    };
+  }
+
+  return { code: value };
+}
+
+function decodeJwtPayload(accessToken) {
+  const token = String(accessToken || "").trim();
+  if (!token) {
+    return null;
+  }
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  try {
+    const payloadRaw = fromBase64Url(parts[1]).toString("utf8");
+    return JSON.parse(payloadRaw);
+  } catch {
+    return null;
+  }
+}
+
+function getOpenAICodexAccountId(accessToken) {
+  const payload = decodeJwtPayload(accessToken);
+  const authClaims = payload?.[OPENAI_CODEX_ACCOUNT_CLAIM_PATH];
+  const accountId = authClaims?.chatgpt_account_id;
+  return typeof accountId === "string" && accountId.trim() ? accountId.trim() : null;
+}
+
+function getOpenAICodexModels() {
+  return openaiCodexModelCatalog.map((item) => ({
+    provider: item.provider,
+    id: item.id,
+    label: item.label,
+  }));
+}
+
+function createOpenAICodexOAuthChallenge({ connectionId, userId }) {
+  const { verifier, challenge } = generatePkcePair();
+  const state = crypto.randomBytes(16).toString("hex");
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + PROVIDER_OAUTH_CHALLENGE_TTL_SEC * 1000;
+
+  const url = new URL(OPENAI_CODEX_OAUTH_AUTHORIZE_URL);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", OPENAI_CODEX_OAUTH_CLIENT_ID);
+  url.searchParams.set("redirect_uri", OPENAI_CODEX_OAUTH_REDIRECT_URI);
+  url.searchParams.set("scope", OPENAI_CODEX_OAUTH_SCOPE);
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("state", state);
+  url.searchParams.set("id_token_add_organizations", "true");
+  url.searchParams.set("codex_cli_simplified_flow", "true");
+  url.searchParams.set("originator", "pi");
+
+  const challengeToken = createOAuthChallengeToken({
+    v: 1,
+    provider: "openai",
+    connectionId: String(connectionId || ""),
+    userId: String(userId || ""),
+    redirectUri: OPENAI_CODEX_OAUTH_REDIRECT_URI,
+    verifier,
+    state,
+    iat: issuedAt,
+    exp: expiresAt,
+  });
+
+  return {
+    challengeToken,
+    authorizeUrl: url.toString(),
+    expiresAt: new Date(expiresAt).toISOString(),
+    state,
+    instructions: [
+      "브라우저에서 OpenAI 로그인을 완료한 뒤",
+      "리다이렉트된 URL 전체를 복사해 붙여넣으세요.",
+      `redirect_uri: ${OPENAI_CODEX_OAUTH_REDIRECT_URI}`,
+    ].join(" "),
+  };
+}
+
+function trackOAuthChallengeState({ state, challengeToken, connectionId, userId, expiresAt }) {
+  const stateKey = String(state || "").trim();
+  if (!stateKey) {
+    return;
+  }
+  const expiresAtMs = new Date(expiresAt).getTime();
+  oauthChallengesByState.set(stateKey, {
+    challengeToken: String(challengeToken || "").trim(),
+    connectionId: String(connectionId || "").trim(),
+    userId: String(userId || "").trim(),
+    expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 60 * 1000,
+  });
+}
+
+function consumeOAuthChallengeState(state) {
+  const stateKey = String(state || "").trim();
+  if (!stateKey) {
+    return null;
+  }
+  const item = oauthChallengesByState.get(stateKey);
+  if (!item) {
+    return null;
+  }
+  oauthChallengesByState.delete(stateKey);
+  if (Date.now() > Number(item.expiresAtMs || 0)) {
+    return null;
+  }
+  return item;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function isLoopbackHost(hostname) {
+  const value = String(hostname || "").trim().toLowerCase();
+  return value === "localhost" || value === "127.0.0.1" || value === "::1";
+}
+
+function resolveOpenAICallbackTarget() {
+  try {
+    const url = new URL(OPENAI_CODEX_OAUTH_REDIRECT_URI);
+    const port = Number(url.port || (url.protocol === "http:" ? 80 : 443));
+    if (!Number.isFinite(port) || port <= 0) {
+      return null;
+    }
+    return {
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port,
+      pathname: url.pathname || "/",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function shouldStartOAuthCallbackBridge() {
+  if (!OAUTH_CALLBACK_BRIDGE_ENABLED || isServerlessRuntime) {
+    return false;
+  }
+  const target = resolveOpenAICallbackTarget();
+  if (!target) {
+    return false;
+  }
+  if (target.protocol !== "http:") {
+    return false;
+  }
+  if (!isLoopbackHost(target.hostname)) {
+    return false;
+  }
+  return true;
+}
+
+function getOAuthCallbackBridgeHtml({
+  title = "OAuth 인증 완료",
+  message = "원래 창으로 돌아가 자동 완료를 기다리세요. 창이 자동으로 닫히지 않으면 직접 닫아도 됩니다.",
+  callbackUrl = "",
+  payload = {},
+  closeDelayMs = 500,
+} = {}) {
+  const safePayload = JSON.stringify(payload || {});
+  const safeTitle = escapeHtml(title);
+  const safeMessage = escapeHtml(message);
+  const safeCallbackUrl = escapeHtml(callbackUrl);
+  return `<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${safeTitle}</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      .wrap {
+        max-width: 640px;
+        margin: 0 auto;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 16px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+      p {
+        margin: 0;
+        font-size: 14px;
+        color: #475569;
+      }
+      code {
+        display: block;
+        margin-top: 12px;
+        padding: 10px;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-size: 12px;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>${safeTitle}</h1>
+      <p>${safeMessage}</p>
+      <code id="callback"></code>
+    </div>
+    <script>
+      (function () {
+        var callbackUrl = ${JSON.stringify(String(callbackUrl || ""))} || window.location.href;
+        var payload = ${safePayload};
+        if (!payload || typeof payload !== "object") {
+          payload = {};
+        }
+        payload.callbackUrl = callbackUrl;
+        var callbackNode = document.getElementById("callback");
+        if (callbackNode) {
+          callbackNode.textContent = callbackUrl;
+        }
+        try {
+          if (window.opener && !window.opener.closed) {
+            window.opener.postMessage(payload, "*");
+          }
+        } catch (error) {
+          // ignore postMessage errors
+        }
+        setTimeout(function () {
+          try {
+            window.close();
+          } catch (error) {
+            // ignore close errors
+          }
+        }, ${Math.max(0, Number(closeDelayMs) || 0)});
+      })();
+    </script>
+  </body>
+</html>`;
+}
+
+function ensureOAuthCallbackBridgeStarted() {
+  if (oauthCallbackBridgeServer || oauthCallbackBridgeAttempted) {
+    return;
+  }
+  oauthCallbackBridgeAttempted = true;
+  if (!shouldStartOAuthCallbackBridge()) {
+    return;
+  }
+
+  const target = resolveOpenAICallbackTarget();
+  if (!target) {
+    return;
+  }
+
+  const bridge = http.createServer(async (req, res) => {
+    const method = String(req.method || "GET").toUpperCase();
+    if (method !== "GET") {
+      res.statusCode = 405;
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.end("Method Not Allowed");
+      return;
+    }
+
+    let url;
+    try {
+      url = new URL(req.url || "/", "http://localhost");
+    } catch {
+      res.statusCode = 400;
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.end("Bad Request");
+      return;
+    }
+
+    if (url.pathname !== target.pathname) {
+      res.statusCode = 404;
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.end("Not Found");
+      return;
+    }
+
+    const callbackUrlObject = new URL(`${target.protocol}//localhost`);
+    callbackUrlObject.hostname = target.hostname;
+    callbackUrlObject.port = String(target.port);
+    callbackUrlObject.pathname = url.pathname;
+    callbackUrlObject.search = url.search;
+    const callbackUrl = callbackUrlObject.toString();
+    const callbackState = String(url.searchParams.get("state") || "").trim();
+    const oauthError = String(url.searchParams.get("error") || "").trim();
+    const oauthErrorDescription = String(
+      url.searchParams.get("error_description") || ""
+    ).trim();
+    const code = String(url.searchParams.get("code") || "").trim();
+
+    if (oauthError) {
+      const message = oauthErrorDescription || oauthError;
+      res.statusCode = 200;
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.end(
+        getOAuthCallbackBridgeHtml({
+          title: "OAuth 인증 실패",
+          message,
+          callbackUrl,
+          payload: {
+            type: "provider-oauth-complete",
+            ok: false,
+            errorMessage: message,
+          },
+          closeDelayMs: 0,
+        })
+      );
+      return;
+    }
+
+    if (code && callbackState) {
+      const tracked = consumeOAuthChallengeState(callbackState);
+      if (tracked?.challengeToken && tracked?.connectionId) {
+        const now = new Date().toISOString();
+        try {
+          const verified = await verifyProviderOAuth({
+            provider: "openai",
+            challengeToken: tracked.challengeToken,
+            callbackInput: callbackUrl,
+            expectedConnectionId: tracked.connectionId,
+            expectedUserId: tracked.userId,
+          });
+          const updated = await repository.updateProviderAuthConnection(
+            tracked.connectionId,
+            {
+              status: "connected",
+              secretEncrypted: encryptProviderSecret(
+                JSON.stringify(verified.secret || {})
+              ),
+              models: normalizeProviderModels("openai", verified.models),
+              meta: verified.meta || {},
+              lastCheckedAt: now,
+              errorMessage: null,
+            }
+          );
+          const provider = toPublicProviderAuthConnection(updated || {});
+          const verifiedModels = Array.isArray(verified.models)
+            ? verified.models.length
+            : 0;
+
+          res.statusCode = 200;
+          res.setHeader("content-type", "text/html; charset=utf-8");
+          res.end(
+            getOAuthCallbackBridgeHtml({
+              title: "OAuth 인증 완료",
+              message: "원래 창으로 돌아가 주세요. 인증 상태를 갱신합니다.",
+              callbackUrl,
+              payload: {
+                type: "provider-oauth-complete",
+                ok: true,
+                providerId: tracked.connectionId,
+                providerName: provider.displayName || "OPEN AI",
+                verifiedModels,
+              },
+            })
+          );
+          return;
+        } catch (error) {
+          const message = sanitizeProviderAuthError(error);
+          try {
+            await repository.updateProviderAuthConnection(tracked.connectionId, {
+              status: "error",
+              errorMessage: message,
+              lastCheckedAt: now,
+            });
+          } catch {
+            // ignore secondary update errors
+          }
+
+          res.statusCode = 200;
+          res.setHeader("content-type", "text/html; charset=utf-8");
+          res.end(
+            getOAuthCallbackBridgeHtml({
+              title: "OAuth 인증 실패",
+              message,
+              callbackUrl,
+              payload: {
+                type: "provider-oauth-complete",
+                ok: false,
+                providerId: tracked.connectionId,
+                errorMessage: message,
+              },
+              closeDelayMs: 0,
+            })
+          );
+          return;
+        }
+      }
+    }
+
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(
+      getOAuthCallbackBridgeHtml({
+        title: "OAuth 콜백 수신",
+        message:
+          "자동 인증 매칭에 실패했습니다. 앱에서 callback URL을 직접 붙여넣어 완료하세요.",
+        callbackUrl,
+        payload: {
+          type: "provider-oauth-callback",
+          callbackUrl,
+        },
+        closeDelayMs: 0,
+      })
+    );
+  });
+
+  bridge.on("error", (error) => {
+    const code = String(error?.code || "").trim();
+    if (code === "EADDRINUSE") {
+      console.warn(
+        `[oauth] callback bridge port already in use: ${target.hostname}:${target.port} (manual callback paste fallback)`
+      );
+    } else {
+      console.warn(
+        `[oauth] callback bridge failed: ${error?.message || "unknown error"} (manual callback paste fallback)`
+      );
+    }
+  });
+
+  bridge.listen(target.port, () => {
+    oauthCallbackBridgeServer = bridge;
+    console.log(
+      `[oauth] callback bridge ready at http://${target.hostname}:${target.port}${target.pathname} (listener=:${target.port})`
+    );
+  });
+}
+
+async function exchangeOpenAICodexAuthorizationCode({ code, verifier, redirectUri }) {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: OPENAI_CODEX_OAUTH_CLIENT_ID,
+    code: String(code || "").trim(),
+    code_verifier: String(verifier || "").trim(),
+    redirect_uri: String(redirectUri || OPENAI_CODEX_OAUTH_REDIRECT_URI).trim(),
+  });
+
+  const { response, payload } = await fetchJsonWithTimeout(
+    OPENAI_CODEX_OAUTH_TOKEN_URL,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body,
+    }
+  );
+
+  if (!response.ok) {
+    const detail =
+      payload?.error_description ||
+      payload?.error ||
+      payload?.message ||
+      `OpenAI OAuth token exchange failed (${response.status})`;
+    throw new Error(detail);
+  }
+
+  const access = String(payload?.access_token || "").trim();
+  const refresh = String(payload?.refresh_token || "").trim();
+  const expiresIn = Number(payload?.expires_in || 0);
+
+  if (!access || !refresh || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error("OpenAI OAuth token response is invalid");
+  }
+
+  return {
+    access,
+    refresh,
+    expires: Date.now() + expiresIn * 1000,
+    expiresIn,
+    tokenType: String(payload?.token_type || "").trim() || null,
+    scope: String(payload?.scope || "").trim() || null,
+  };
+}
+
+function sanitizeProviderAuthError(error) {
+  const raw = String(error?.message || "provider authentication failed")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) {
+    return "provider authentication failed";
+  }
+  return raw.slice(0, 240);
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = PROVIDER_AUTH_FETCH_TIMEOUT_MS) {
+  if (typeof fetch !== "function") {
+    throw new Error("runtime fetch is unavailable");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = {};
+    }
+    return { response, payload };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("provider auth request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function verifyOpenAIProvider(apiKey) {
+  const { response, payload } = await fetchJsonWithTimeout(
+    "https://api.openai.com/v1/models",
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      payload?.message ||
+      `OpenAI request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const models = rows
+    .map((item) => String(item?.id || "").trim())
+    .filter(Boolean)
+    .filter((id) => {
+      const lower = id.toLowerCase();
+      return (
+        lower.startsWith("gpt-") ||
+        lower.startsWith("o1") ||
+        lower.startsWith("o3") ||
+        lower.startsWith("o4") ||
+        lower.includes("codex")
+      );
+    })
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, PROVIDER_AUTH_MODELS_LIMIT)
+    .map((id) => ({ id, label: id }));
+
+  return {
+    models,
+    meta: {
+      fetchedAt: new Date().toISOString(),
+      totalModels: rows.length,
+    },
+  };
+}
+
+async function verifyGoogleProvider(apiKey) {
+  const { response, payload } = await fetchJsonWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
+      apiKey
+    )}`,
+    {
+      method: "GET",
+    }
+  );
+
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      payload?.message ||
+      `Google request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  const rows = Array.isArray(payload?.models) ? payload.models : [];
+  const models = rows
+    .filter((item) =>
+      Array.isArray(item?.supportedGenerationMethods)
+        ? item.supportedGenerationMethods.includes("generateContent")
+        : true
+    )
+    .map((item) => String(item?.name || "").replace(/^models\//i, "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, PROVIDER_AUTH_MODELS_LIMIT)
+    .map((id) => ({ id, label: id }));
+
+  return {
+    models,
+    meta: {
+      fetchedAt: new Date().toISOString(),
+      totalModels: rows.length,
+    },
+  };
+}
+
+async function verifyProviderApiKey({ provider, apiKey }) {
+  const normalizedProvider = normalizeProviderId(provider);
+  const secret = String(apiKey || "").trim();
+  if (!secret) {
+    throw new Error("apiKey is required");
+  }
+
+  if (normalizedProvider === "openai") {
+    return verifyOpenAIProvider(secret);
+  }
+  if (normalizedProvider === "google") {
+    return verifyGoogleProvider(secret);
+  }
+
+  throw new Error(`unsupported provider: ${normalizedProvider}`);
+}
+
+async function verifyProviderOAuth({
+  provider,
+  challengeToken,
+  callbackInput,
+  expectedConnectionId,
+  expectedUserId,
+}) {
+  const normalizedProvider = normalizeProviderId(provider);
+  if (!challengeToken) {
+    throw new Error("challengeToken is required");
+  }
+
+  if (normalizedProvider !== "openai") {
+    throw new Error(`unsupported oauth provider: ${normalizedProvider}`);
+  }
+
+  const challenge = parseOAuthChallengeToken(challengeToken);
+  if (normalizeProviderId(challenge.provider) !== normalizedProvider) {
+    throw new Error("challenge provider mismatch");
+  }
+  if (String(challenge.connectionId || "") !== String(expectedConnectionId || "")) {
+    throw new Error("challenge connection mismatch");
+  }
+  if (String(challenge.userId || "") !== String(expectedUserId || "")) {
+    throw new Error("challenge user mismatch");
+  }
+
+  const parsedInput = parseAuthorizationInput(callbackInput);
+  const code = String(parsedInput.code || "").trim();
+  if (!code) {
+    throw new Error("authorization code is required");
+  }
+  if (parsedInput.state && String(parsedInput.state) !== String(challenge.state || "")) {
+    throw new Error("state mismatch");
+  }
+
+  const token = await exchangeOpenAICodexAuthorizationCode({
+    code,
+    verifier: challenge.verifier,
+    redirectUri: challenge.redirectUri || OPENAI_CODEX_OAUTH_REDIRECT_URI,
+  });
+  const accountId = getOpenAICodexAccountId(token.access);
+
+  return {
+    secret: {
+      type: "oauth",
+      provider: normalizedProvider,
+      access: token.access,
+      refresh: token.refresh,
+      expires: token.expires,
+      accountId,
+    },
+    models: getOpenAICodexModels(),
+    meta: {
+      mode: "oauth",
+      flow: "openai-codex-pkce",
+      connectedAt: new Date().toISOString(),
+      accountId,
+      tokenType: token.tokenType,
+      scope: token.scope,
+      expiresAt: new Date(token.expires).toISOString(),
+      expiresIn: token.expiresIn,
+    },
+  };
+}
+
+async function ensureDefaultProviderAuthConnections() {
+  for (const template of providerAuthTemplates) {
+    await repository.upsertProviderAuthConnection({
+      provider: template.provider,
+      displayName: template.label,
+      authMode: template.authMode,
+    });
+  }
+}
+
+async function listProviderAuthConnectionsForResponse() {
+  await ensureDefaultProviderAuthConnections();
+  const connections = await repository.listProviderAuthConnections(100);
+  return connections.map((item) => toPublicProviderAuthConnection(item));
+}
+
 function parseCookieHeader(cookieHeader) {
   const out = {};
   const raw = String(cookieHeader || "");
@@ -956,6 +2029,7 @@ async function ensureInitialized() {
       ontologyService.loadOverrides(storedOverrides);
 
       await ensureBootstrapUser();
+      await ensureDefaultProviderAuthConnections();
 
       initialized = true;
     })().catch((error) => {
@@ -1469,6 +2543,314 @@ app.get("/api/skills", (req, res) => {
   res.json({
     skills,
   });
+});
+
+app.get("/api/provider-auth", authenticate, async (req, res, next) => {
+  try {
+    const providers = await listProviderAuthConnectionsForResponse();
+    return res.json({
+      providers,
+      templates: providerAuthTemplates.map((item) => ({
+        provider: item.provider,
+        label: item.label,
+        description: item.description,
+        authMode: item.authMode,
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/provider-auth", ...requireAdminRole, async (req, res) => {
+  try {
+    const provider = normalizeProviderId(req.body?.provider);
+    const template = getProviderTemplate(provider);
+    if (!template) {
+      return res.status(400).json({
+        error: "invalid_provider",
+        message: `unsupported provider: ${provider || "unknown"}`,
+      });
+    }
+
+    const existing = await repository.getProviderAuthConnectionByProvider(provider);
+    const displayName =
+      String(req.body?.displayName || template.label).trim() || template.label;
+    const connection = await repository.upsertProviderAuthConnection({
+      provider,
+      displayName,
+      authMode: template.authMode,
+    });
+
+    return res.status(existing ? 200 : 201).json({
+      created: !existing,
+      provider: toPublicProviderAuthConnection(connection),
+    });
+  } catch (error) {
+    return res.status(400).json({
+      error: "provider_create_failed",
+      message: error.message,
+    });
+  }
+});
+
+app.post(
+  "/api/provider-auth/:connectionId/authenticate",
+  ...requireAdminRole,
+  async (req, res) => {
+    const connectionId = String(req.params?.connectionId || "").trim();
+    if (!connectionId) {
+      return res.status(400).json({
+        error: "invalid_provider",
+        message: "connectionId is required",
+      });
+    }
+
+    const apiKey = String(req.body?.apiKey || "").trim();
+    if (!apiKey) {
+      return res.status(400).json({
+        error: "invalid_provider_auth",
+        message: "apiKey is required",
+      });
+    }
+
+    const connection = await repository.getProviderAuthConnection(connectionId);
+    if (!connection) {
+      return res.status(404).json({
+        error: "provider_not_found",
+        message: "provider connection not found",
+      });
+    }
+    const authMode = String(connection.authMode || "").trim().toLowerCase();
+    if (authMode !== "api_key") {
+      return res.status(400).json({
+        error: "invalid_provider_auth_mode",
+        message: `${connection.provider} provider requires ${authMode || "oauth"} auth flow`,
+      });
+    }
+
+    const now = new Date().toISOString();
+    try {
+      const verified = await verifyProviderApiKey({
+        provider: connection.provider,
+        apiKey,
+      });
+
+      const updated = await repository.updateProviderAuthConnection(connection.id, {
+        status: "connected",
+        secretEncrypted: encryptProviderSecret(apiKey),
+        models: normalizeProviderModels(connection.provider, verified.models),
+        meta: verified.meta || {},
+        lastCheckedAt: now,
+        errorMessage: null,
+      });
+
+      return res.json({
+        provider: toPublicProviderAuthConnection(updated || connection),
+        verifiedModels: Array.isArray(verified.models) ? verified.models.length : 0,
+      });
+    } catch (error) {
+      const message = sanitizeProviderAuthError(error);
+      try {
+        await repository.updateProviderAuthConnection(connection.id, {
+          status: "error",
+          errorMessage: message,
+          lastCheckedAt: now,
+        });
+      } catch {
+        // ignore secondary update errors
+      }
+      return res.status(400).json({
+        error: "provider_auth_failed",
+        message,
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/provider-auth/:connectionId/oauth/start",
+  ...requireAdminRole,
+  async (req, res) => {
+    const connectionId = String(req.params?.connectionId || "").trim();
+    if (!connectionId) {
+      return res.status(400).json({
+        error: "invalid_provider",
+        message: "connectionId is required",
+      });
+    }
+
+    const connection = await repository.getProviderAuthConnection(connectionId);
+    if (!connection) {
+      return res.status(404).json({
+        error: "provider_not_found",
+        message: "provider connection not found",
+      });
+    }
+
+    const authMode = String(connection.authMode || "").trim().toLowerCase();
+    if (authMode !== "oauth") {
+      return res.status(400).json({
+        error: "invalid_provider_auth_mode",
+        message: `${connection.provider} provider requires api key auth flow`,
+      });
+    }
+    if (normalizeProviderId(connection.provider) !== "openai") {
+      return res.status(400).json({
+        error: "unsupported_oauth_provider",
+        message: `unsupported oauth provider: ${connection.provider}`,
+      });
+    }
+
+    const oauth = createOpenAICodexOAuthChallenge({
+      connectionId: connection.id,
+      userId: req.authUser?.id || "",
+    });
+    trackOAuthChallengeState({
+      state: oauth.state,
+      challengeToken: oauth.challengeToken,
+      connectionId: connection.id,
+      userId: req.authUser?.id || "",
+      expiresAt: oauth.expiresAt,
+    });
+
+    return res.json({
+      provider: toPublicProviderAuthConnection(connection),
+      oauth,
+    });
+  }
+);
+
+app.post(
+  "/api/provider-auth/:connectionId/oauth/complete",
+  ...requireAdminRole,
+  async (req, res) => {
+    const connectionId = String(req.params?.connectionId || "").trim();
+    if (!connectionId) {
+      return res.status(400).json({
+        error: "invalid_provider",
+        message: "connectionId is required",
+      });
+    }
+
+    const challengeToken = String(req.body?.challengeToken || "").trim();
+    const callbackInput = String(req.body?.callbackInput || "").trim();
+    if (!challengeToken || !callbackInput) {
+      return res.status(400).json({
+        error: "invalid_provider_auth",
+        message: "challengeToken and callbackInput are required",
+      });
+    }
+    const callbackState = String(
+      parseAuthorizationInput(callbackInput)?.state || ""
+    ).trim();
+    if (callbackState) {
+      consumeOAuthChallengeState(callbackState);
+    }
+
+    const connection = await repository.getProviderAuthConnection(connectionId);
+    if (!connection) {
+      return res.status(404).json({
+        error: "provider_not_found",
+        message: "provider connection not found",
+      });
+    }
+
+    const authMode = String(connection.authMode || "").trim().toLowerCase();
+    if (authMode !== "oauth") {
+      return res.status(400).json({
+        error: "invalid_provider_auth_mode",
+        message: `${connection.provider} provider requires api key auth flow`,
+      });
+    }
+
+    const now = new Date().toISOString();
+    try {
+      const verified = await verifyProviderOAuth({
+        provider: connection.provider,
+        challengeToken,
+        callbackInput,
+        expectedConnectionId: connection.id,
+        expectedUserId: req.authUser?.id || "",
+      });
+
+      const updated = await repository.updateProviderAuthConnection(connection.id, {
+        status: "connected",
+        secretEncrypted: encryptProviderSecret(JSON.stringify(verified.secret || {})),
+        models: normalizeProviderModels(connection.provider, verified.models),
+        meta: verified.meta || {},
+        lastCheckedAt: now,
+        errorMessage: null,
+      });
+
+      return res.json({
+        provider: toPublicProviderAuthConnection(updated || connection),
+        verifiedModels: Array.isArray(verified.models) ? verified.models.length : 0,
+      });
+    } catch (error) {
+      const message = sanitizeProviderAuthError(error);
+      try {
+        await repository.updateProviderAuthConnection(connection.id, {
+          status: "error",
+          errorMessage: message,
+          lastCheckedAt: now,
+        });
+      } catch {
+        // ignore secondary update errors
+      }
+      return res.status(400).json({
+        error: "provider_auth_failed",
+        message,
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/provider-auth/:connectionId/disconnect",
+  ...requireAdminRole,
+  async (req, res) => {
+    const connectionId = String(req.params?.connectionId || "").trim();
+    if (!connectionId) {
+      return res.status(400).json({
+        error: "invalid_provider",
+        message: "connectionId is required",
+      });
+    }
+
+    const connection = await repository.getProviderAuthConnection(connectionId);
+    if (!connection) {
+      return res.status(404).json({
+        error: "provider_not_found",
+        message: "provider connection not found",
+      });
+    }
+
+    const updated = await repository.updateProviderAuthConnection(connection.id, {
+      status: "pending",
+      secretEncrypted: null,
+      models: [],
+      errorMessage: null,
+      lastCheckedAt: new Date().toISOString(),
+    });
+
+    return res.json({
+      provider: toPublicProviderAuthConnection(updated || connection),
+    });
+  }
+);
+
+app.get("/api/models", authenticate, async (req, res, next) => {
+  try {
+    const providers = await listProviderAuthConnectionsForResponse();
+    const models = getModelCatalogFromConnections(providers);
+    return res.json({
+      models,
+      providers,
+    });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 app.get("/api/avatars/random", async (req, res) => {
@@ -1997,16 +3379,31 @@ function registerShutdownHooks() {
     return;
   }
 
+  const closeOAuthBridge = (done) => {
+    if (!oauthCallbackBridgeServer) {
+      done();
+      return;
+    }
+
+    const bridge = oauthCallbackBridgeServer;
+    oauthCallbackBridgeServer = null;
+    try {
+      bridge.close(() => done());
+    } catch {
+      done();
+    }
+  };
+
   const shutdown = (signal) => {
     console.log(`Received ${signal}. Shutting down...`);
     jobQueue.stop();
     if (httpServer) {
       httpServer.close(() => {
-        process.exit(0);
+        closeOAuthBridge(() => process.exit(0));
       });
       return;
     }
-    process.exit(0);
+    closeOAuthBridge(() => process.exit(0));
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
@@ -2040,6 +3437,7 @@ async function bootstrap({
 
   if (startServer) {
     registerShutdownHooks();
+    ensureOAuthCallbackBridgeStarted();
     return ensureHttpServerStarted();
   }
 

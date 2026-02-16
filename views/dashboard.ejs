@@ -32,6 +32,16 @@
               <li>
                 <button
                   type="button"
+                  data-tab="auth-api"
+                  class="tab-btn flex w-full items-center justify-between rounded-2xl px-4 py-3 font-semibold transition"
+                >
+                  <span>Auth & API</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">Auth</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
                   data-tab="data-processing"
                   class="tab-btn flex w-full items-center justify-between rounded-2xl px-4 py-3 font-semibold transition"
                 >
@@ -77,6 +87,26 @@
 
         <section class="min-w-0">
           <main class="min-w-0">
+            <section data-panel="auth-api" class="tab-panel hidden min-w-0 max-w-full rounded-3xl bg-white p-6 shadow-soft">
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div>
+      <h2 class="font-display text-xl font-semibold">Auth & API 인증</h2>
+      <p class="mt-1 text-sm text-slate-500">Provider를 인증하면 Agent 생성에서 모델을 선택할 수 있습니다.</p>
+    </div>
+    <span class="rounded-full bg-[#eef6ff] px-3 py-1 text-xs font-semibold text-electric">Model Access Hub</span>
+  </div>
+
+  <div id="apNotice" class="mt-4 hidden rounded-xl border px-3 py-2 text-sm"></div>
+
+  <article class="mt-6 rounded-2xl border border-slate-100 bg-slate-50 p-5">
+    <h3 class="font-semibold text-slate-900">인증된 Provider</h3>
+
+    <ul id="apProviderList" class="mt-4 space-y-3 text-sm">
+      <li class="rounded-xl border border-slate-200 bg-white p-3 text-slate-500">인증 항목을 불러오는 중입니다...</li>
+    </ul>
+  </article>
+</section>
+
             <section data-panel="data-processing" class="tab-panel min-w-0 max-w-full rounded-3xl bg-white p-6 shadow-soft">
   <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
     <div>
@@ -192,6 +222,20 @@
             value="Growth Analyst Agent"
             class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
           />
+        </label>
+      </article>
+
+      <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+        <h3 class="font-semibold text-slate-900">Agent 모델 선택</h3>
+        <p class="mt-1 text-sm text-slate-500">Auth & API 탭에서 인증한 모델을 선택할 수 있습니다.</p>
+        <label class="mt-3 block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Model</span>
+          <select
+            id="acModelSelect"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          >
+            <option value="Balanced (default)">Balanced (default)</option>
+          </select>
         </label>
       </article>
 
@@ -712,6 +756,22 @@
           agents: [],
           skills: [],
           selectedAvatar: null,
+          providerAuth: {
+            providers: [],
+            models: [
+              {
+                value: 'Balanced (default)',
+                label: 'Balanced (default)',
+                provider: 'system',
+                modelId: 'Balanced (default)',
+                source: 'builtin',
+              },
+            ],
+            activeAuthProviderId: null,
+            oauthChallenges: {},
+            oauthCompleting: {},
+            lastAutoCallbackUrl: '',
+          },
           dataProcessing: {
             features: [],
             lastFileName: '',
@@ -759,6 +819,7 @@
         const ac = {
           notice: document.getElementById('acNotice'),
           name: document.getElementById('acName'),
+          modelSelect: document.getElementById('acModelSelect'),
           prompt: document.getElementById('acPrompt'),
           skillList: document.getElementById('acSkillList'),
           clearSkillsBtn: document.getElementById('acClearSkillsBtn'),
@@ -768,6 +829,11 @@
           rerollAvatarBtn: document.getElementById('acRerollAvatarBtn'),
           createBtn: document.getElementById('acCreateBtn'),
           list: document.getElementById('acAgentList'),
+        };
+
+        const ap = {
+          notice: document.getElementById('apNotice'),
+          providerList: document.getElementById('apProviderList'),
         };
 
         const ad = {
@@ -799,6 +865,8 @@
 
         let refreshingData = false;
         let refreshingAgents = false;
+        let refreshingProviderAuth = false;
+        let refreshingModelCatalog = false;
         let pollTimer = null;
 
         function getStatusBadge(status) {
@@ -833,7 +901,12 @@
         }
 
         function setActionButtonsDisabled(isLoading) {
-          [dp.pickFileBtn, ac.clearSkillsBtn, ac.rerollAvatarBtn, ac.createBtn].forEach((button) => {
+          [
+            dp.pickFileBtn,
+            ac.clearSkillsBtn,
+            ac.rerollAvatarBtn,
+            ac.createBtn,
+          ].forEach((button) => {
             if (!button) {
               return;
             }
@@ -949,6 +1022,645 @@
             image.onerror = () => finish(false);
             image.decoding = 'async';
             image.src = targetUrl;
+          });
+        }
+
+        function canManageProviderAuth() {
+          const role = String(state.auth.user?.role || '').trim().toLowerCase();
+          return role === 'owner' || role === 'admin';
+        }
+
+        function getProviderStatusMeta(statusRaw) {
+          const status = String(statusRaw || '').trim().toLowerCase();
+          if (status === 'connected') {
+            return {
+              label: '인증 완료',
+              className: 'border-emerald-200 bg-emerald-100 text-emerald-800',
+            };
+          }
+          if (status === 'error') {
+            return {
+              label: '인증 실패',
+              className: 'border-rose-200 bg-rose-100 text-rose-800',
+            };
+          }
+          return {
+            label: '미인증',
+            className: 'border-slate-200 bg-slate-100 text-slate-700',
+          };
+        }
+
+        function renderAgentModelCatalog() {
+          if (!ac.modelSelect) {
+            return;
+          }
+
+          const fallbackModel = [
+            {
+              value: 'Balanced (default)',
+              label: 'Balanced (default)',
+              provider: 'system',
+            },
+          ];
+          const models = Array.isArray(state.providerAuth.models) && state.providerAuth.models.length > 0
+            ? state.providerAuth.models
+            : fallbackModel;
+          const previousValue = String(ac.modelSelect.value || '').trim();
+          ac.modelSelect.innerHTML = models
+            .map((item) => {
+              const value = String(item.value || '').trim();
+              const label = String(item.label || value || '').trim() || value;
+              const provider = String(item.provider || '').trim();
+              const sourceLabel = provider && provider !== 'system' ? ` (${provider})` : '';
+              return `<option value="${escapeHtml(value)}">${escapeHtml(`${label}${sourceLabel}`)}</option>`;
+            })
+            .join('');
+
+          const hasPreviousValue = models.some((item) => String(item.value || '').trim() === previousValue);
+          if (hasPreviousValue) {
+            ac.modelSelect.value = previousValue;
+            return;
+          }
+          if (models.length > 0) {
+            ac.modelSelect.value = String(models[0].value || 'Balanced (default)');
+          }
+        }
+
+        function renderProviderAuthList() {
+          if (!ap.providerList) {
+            return;
+          }
+
+          const providers = Array.isArray(state.providerAuth.providers)
+            ? state.providerAuth.providers
+            : [];
+          const canManage = canManageProviderAuth();
+          const disabledClass = canManage ? '' : 'cursor-not-allowed opacity-60';
+          const disabledAttr = canManage ? '' : 'disabled';
+          const activeProviderId = String(state.providerAuth.activeAuthProviderId || '');
+
+          if (providers.length === 0) {
+            ap.providerList.innerHTML =
+              '<li class="rounded-xl border border-slate-200 bg-white p-3 text-slate-500">등록된 인증 항목이 없습니다.</li>';
+            return;
+          }
+
+          ap.providerList.innerHTML = providers
+            .map((provider) => {
+              const statusMeta = getProviderStatusMeta(provider.status);
+              const providerId = String(provider.id || '').trim();
+              const displayName = String(provider.displayName || provider.provider || '').trim() || '-';
+              const modelCount = Math.max(0, Number(provider.modelCount) || 0);
+              const errorMessage = String(provider.errorMessage || '').trim();
+              const isActive = providerId === activeProviderId;
+              const authMode = String(provider.authMode || 'api_key').trim().toLowerCase();
+              const isOauthMode = authMode === 'oauth';
+              const actionLabel = provider.status === 'connected' ? '재인증' : 'Auth 인증하기';
+              const oauthState = state.providerAuth.oauthChallenges?.[providerId] || null;
+              const oauthExpiresAt = String(oauthState?.expiresAt || '').trim();
+              const oauthExpiresDate = oauthExpiresAt ? new Date(oauthExpiresAt) : null;
+              const oauthExpiresText =
+                oauthExpiresDate && !Number.isNaN(oauthExpiresDate.getTime())
+                  ? oauthExpiresDate.toLocaleString('ko-KR')
+                  : '';
+
+              return `
+                <li class="rounded-xl border border-slate-200 bg-white p-3">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="min-w-0">
+                      <p class="font-semibold text-slate-900">${escapeHtml(displayName)}</p>
+                      <p class="mt-1 text-xs text-slate-500">provider: ${escapeHtml(provider.provider || '-')} · 인증: ${escapeHtml(authMode)} · 모델 ${escapeHtml(String(modelCount))}개</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="rounded-lg border px-2 py-1 text-xs font-semibold ${statusMeta.className}">${statusMeta.label}</span>
+                      <button
+                        type="button"
+                        data-action="open-auth"
+                        data-provider-id="${escapeHtml(providerId)}"
+                        class="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 ${disabledClass}"
+                        ${disabledAttr}
+                      >
+                        ${actionLabel}
+                      </button>
+                      <button
+                        type="button"
+                        data-action="disconnect-provider"
+                        data-provider-id="${escapeHtml(providerId)}"
+                        class="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 ${disabledClass}"
+                        ${disabledAttr}
+                      >
+                        연결 해제
+                      </button>
+                    </div>
+                  </div>
+                  ${errorMessage ? `<p class="mt-2 text-xs text-rose-600">${escapeHtml(errorMessage)}</p>` : ''}
+                  ${
+                    isActive
+                      ? `
+                    <form data-auth-form="true" data-provider-id="${escapeHtml(providerId)}" data-auth-mode="${escapeHtml(authMode)}" class="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      ${
+                        isOauthMode
+                          ? `
+                        <p class="text-xs text-slate-600">
+                          브라우저 인증 후 리다이렉트 URL 전체(또는 code)를 붙여넣어 완료하세요.
+                        </p>
+                        <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            data-action="start-oauth"
+                            data-provider-id="${escapeHtml(providerId)}"
+                            class="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 ${disabledClass}"
+                            ${disabledAttr}
+                          >
+                            인증 URL 열기
+                          </button>
+                          ${
+                            oauthState?.challengeToken
+                              ? `<span class="text-[11px] text-slate-500">유효시간: ${escapeHtml(oauthExpiresText || '-')}</span>`
+                              : '<span class="text-[11px] text-slate-500">인증 URL을 먼저 열어주세요.</span>'
+                          }
+                        </div>
+                        <label class="mt-3 block text-sm">
+                          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Callback URL or Code</span>
+                          <input
+                            name="callbackInput"
+                            type="text"
+                            autocomplete="off"
+                            placeholder="http://localhost:1455/auth/callback?code=...&state=... 또는 code"
+                            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+                            required
+                          />
+                        </label>
+                      `
+                          : `
+                        <label class="block text-sm">
+                          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">API Key</span>
+                          <input
+                            name="apiKey"
+                            type="password"
+                            autocomplete="off"
+                            placeholder="AIza..., 등"
+                            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+                            required
+                          />
+                        </label>
+                      `
+                      }
+                      <div class="mt-3 flex flex-wrap items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          data-action="cancel-auth"
+                          data-provider-id="${escapeHtml(providerId)}"
+                          class="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 ${disabledClass}"
+                          ${disabledAttr}
+                        >
+                          취소
+                        </button>
+                        <button
+                          type="submit"
+                          class="rounded-lg bg-ink px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-800 ${disabledClass}"
+                          ${disabledAttr}
+                        >
+                          인증 저장
+                        </button>
+                      </div>
+                    </form>
+                  `
+                      : ''
+                  }
+                </li>
+              `;
+            })
+            .join('');
+        }
+
+        function findProviderConnection(providerId) {
+          const normalizedProviderId = String(providerId || '').trim();
+          if (!normalizedProviderId) {
+            return null;
+          }
+          return (
+            (Array.isArray(state.providerAuth.providers) ? state.providerAuth.providers : []).find(
+              (item) => String(item?.id || '').trim() === normalizedProviderId
+            ) || null
+          );
+        }
+
+        function clearProviderOAuthState(providerId) {
+          const normalizedProviderId = String(providerId || '').trim();
+          if (!normalizedProviderId) {
+            return;
+          }
+          if (!state.providerAuth.oauthChallenges || typeof state.providerAuth.oauthChallenges !== 'object') {
+            state.providerAuth.oauthChallenges = {};
+          }
+          delete state.providerAuth.oauthChallenges[normalizedProviderId];
+        }
+
+        function parseOAuthStateFromCallbackInput(input) {
+          const value = String(input || '').trim();
+          if (!value) {
+            return '';
+          }
+
+          try {
+            const parsed = new URL(value);
+            return String(parsed.searchParams.get('state') || '').trim();
+          } catch {
+            // not a full URL
+          }
+
+          if (value.includes('state=')) {
+            const params = new URLSearchParams(value);
+            return String(params.get('state') || '').trim();
+          }
+
+          return '';
+        }
+
+        function resolveProviderIdFromOAuthState(callbackState) {
+          const targetState = String(callbackState || '').trim();
+          if (!targetState) {
+            return '';
+          }
+          const entries = Object.entries(state.providerAuth.oauthChallenges || {});
+          for (const [providerId, challenge] of entries) {
+            const challengeState = String(challenge?.state || '').trim();
+            if (challengeState && challengeState === targetState) {
+              return String(providerId || '').trim();
+            }
+          }
+          return '';
+        }
+
+        function resolvePendingOAuthProviderId(callbackInput) {
+          const stateFromCallback = parseOAuthStateFromCallbackInput(callbackInput);
+          const byState = resolveProviderIdFromOAuthState(stateFromCallback);
+          if (byState) {
+            return byState;
+          }
+
+          const activeProviderId = String(state.providerAuth.activeAuthProviderId || '').trim();
+          if (activeProviderId && state.providerAuth.oauthChallenges?.[activeProviderId]) {
+            return activeProviderId;
+          }
+
+          const pendingProviderIds = Object.keys(state.providerAuth.oauthChallenges || {});
+          if (pendingProviderIds.length === 1) {
+            return String(pendingProviderIds[0] || '').trim();
+          }
+
+          return '';
+        }
+
+        async function refreshProviderAuth() {
+          if (refreshingProviderAuth) {
+            return;
+          }
+          refreshingProviderAuth = true;
+          try {
+            const response = await requestJson('/api/provider-auth');
+            state.providerAuth.providers = Array.isArray(response.providers) ? response.providers : [];
+            const providerIdSet = new Set(
+              state.providerAuth.providers.map((item) => String(item?.id || '').trim()).filter(Boolean)
+            );
+            if (!providerIdSet.has(String(state.providerAuth.activeAuthProviderId || '').trim())) {
+              state.providerAuth.activeAuthProviderId = null;
+            }
+            const oauthChallenges = state.providerAuth.oauthChallenges || {};
+            for (const providerId of Object.keys(oauthChallenges)) {
+              if (!providerIdSet.has(providerId)) {
+                delete oauthChallenges[providerId];
+              }
+            }
+            renderProviderAuthList();
+          } catch (error) {
+            state.providerAuth.providers = [];
+            renderProviderAuthList();
+            setNotice(ap.notice, `인증 항목 조회 실패: ${error.message}`, 'error');
+          } finally {
+            refreshingProviderAuth = false;
+          }
+        }
+
+        async function refreshModelCatalog() {
+          if (refreshingModelCatalog) {
+            return;
+          }
+          refreshingModelCatalog = true;
+          try {
+            const response = await requestJson('/api/models');
+            state.providerAuth.models = Array.isArray(response.models) ? response.models : [];
+            renderAgentModelCatalog();
+          } catch (error) {
+            state.providerAuth.models = [
+              {
+                value: 'Balanced (default)',
+                label: 'Balanced (default)',
+                provider: 'system',
+                modelId: 'Balanced (default)',
+                source: 'builtin',
+              },
+            ];
+            renderAgentModelCatalog();
+            setNotice(ac.notice, `모델 목록 조회 실패: ${error.message}`, 'error');
+          } finally {
+            refreshingModelCatalog = false;
+          }
+        }
+
+        async function startProviderOAuth(providerId, options = {}) {
+          const normalizedProviderId = String(providerId || '').trim();
+          if (!normalizedProviderId) {
+            return;
+          }
+
+          const openWindow = options.openWindow !== false;
+          try {
+            const response = await requestJson(`/api/provider-auth/${encodeURIComponent(normalizedProviderId)}/oauth/start`, {
+              method: 'POST',
+            });
+            const oauth = response?.oauth || {};
+            const authorizeUrl = String(oauth.authorizeUrl || '').trim();
+            const challengeToken = String(oauth.challengeToken || '').trim();
+            const expiresAt = String(oauth.expiresAt || '').trim();
+            const challengeState = String(oauth.state || '').trim();
+            if (!authorizeUrl || !challengeToken) {
+              throw new Error('OAuth 인증 URL 생성에 실패했습니다.');
+            }
+
+            if (!state.providerAuth.oauthChallenges || typeof state.providerAuth.oauthChallenges !== 'object') {
+              state.providerAuth.oauthChallenges = {};
+            }
+            state.providerAuth.oauthChallenges[normalizedProviderId] = {
+              authorizeUrl,
+              challengeToken,
+              expiresAt,
+              state: challengeState,
+            };
+
+            renderProviderAuthList();
+
+            if (openWindow) {
+              const opened = window.open(authorizeUrl, '_blank');
+              if (!opened) {
+                setNotice(
+                  ap.notice,
+                  '팝업이 차단되었습니다. 브라우저에서 팝업 허용 후 다시 시도하거나, URL을 새 탭에서 직접 열어주세요.',
+                  'info'
+                );
+              }
+            }
+
+            setNotice(
+              ap.notice,
+              '브라우저 인증 완료 후 자동으로 처리됩니다. 자동 실패 시 callback URL을 수동으로 붙여넣어 완료하세요.',
+              'info'
+            );
+          } catch (error) {
+            setNotice(ap.notice, `OAuth 시작 실패: ${error.message}`, 'error');
+          }
+        }
+
+        async function completeProviderOAuth(providerId, callbackInput) {
+          const normalizedProviderId = String(providerId || '').trim();
+          const normalizedCallbackInput = String(callbackInput || '').trim();
+          if (!normalizedProviderId || !normalizedCallbackInput) {
+            setNotice(ap.notice, 'callback URL 또는 code를 입력하세요.', 'error');
+            return;
+          }
+
+          if (!state.providerAuth.oauthCompleting || typeof state.providerAuth.oauthCompleting !== 'object') {
+            state.providerAuth.oauthCompleting = {};
+          }
+          if (state.providerAuth.oauthCompleting[normalizedProviderId]) {
+            return;
+          }
+          state.providerAuth.oauthCompleting[normalizedProviderId] = true;
+
+          const oauthState = state.providerAuth.oauthChallenges?.[normalizedProviderId] || null;
+          const challengeToken = String(oauthState?.challengeToken || '').trim();
+          if (!challengeToken) {
+            state.providerAuth.oauthCompleting[normalizedProviderId] = false;
+            setNotice(ap.notice, '먼저 인증 URL 열기를 실행하세요.', 'error');
+            return;
+          }
+
+          try {
+            const response = await requestJson(
+              `/api/provider-auth/${encodeURIComponent(normalizedProviderId)}/oauth/complete`,
+              {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  challengeToken,
+                  callbackInput: normalizedCallbackInput,
+                }),
+              }
+            );
+            clearProviderOAuthState(normalizedProviderId);
+            state.providerAuth.activeAuthProviderId = null;
+            await Promise.all([refreshProviderAuth(), refreshModelCatalog()]);
+            const providerName = response?.provider?.displayName || 'provider';
+            const modelCount = Number(response?.verifiedModels || 0);
+            setNotice(ap.notice, `${providerName} OAuth 인증 완료 (모델 ${modelCount}개 확인)`, 'success');
+          } catch (error) {
+            setNotice(ap.notice, `OAuth 인증 실패: ${error.message}`, 'error');
+          } finally {
+            state.providerAuth.oauthCompleting[normalizedProviderId] = false;
+          }
+        }
+
+        async function handleOAuthPopupCallback(callbackUrl) {
+          const normalizedCallbackUrl = String(callbackUrl || '').trim();
+          if (!normalizedCallbackUrl) {
+            return;
+          }
+          if (state.providerAuth.lastAutoCallbackUrl === normalizedCallbackUrl) {
+            return;
+          }
+          state.providerAuth.lastAutoCallbackUrl = normalizedCallbackUrl;
+
+          const providerId = resolvePendingOAuthProviderId(normalizedCallbackUrl);
+          if (!providerId) {
+            setNotice(
+              ap.notice,
+              '자동 OAuth 매칭에 실패했습니다. callback URL을 입력 칸에 붙여넣어 인증 저장을 눌러주세요.',
+              'info'
+            );
+            return;
+          }
+
+          await completeProviderOAuth(providerId, normalizedCallbackUrl);
+        }
+
+        async function handleOAuthAutoCompletePayload(payload = {}) {
+          const ok = Boolean(payload?.ok);
+          const providerId = String(payload?.providerId || '').trim();
+          const providerName = String(payload?.providerName || 'OPEN AI').trim() || 'OPEN AI';
+          const callbackUrl = String(payload?.callbackUrl || '').trim();
+          const errorMessage = String(payload?.errorMessage || '').trim();
+
+          if (providerId) {
+            clearProviderOAuthState(providerId);
+          }
+
+          if (ok) {
+            state.providerAuth.activeAuthProviderId = null;
+            await Promise.all([refreshProviderAuth(), refreshModelCatalog()]);
+            const modelCount = Math.max(0, Number(payload?.verifiedModels || 0));
+            setNotice(ap.notice, `${providerName} OAuth 자동 인증 완료 (모델 ${modelCount}개 확인)`, 'success');
+            return;
+          }
+
+          if (callbackUrl) {
+            const providerIdFromCallback = resolvePendingOAuthProviderId(callbackUrl);
+            if (providerIdFromCallback) {
+              await completeProviderOAuth(providerIdFromCallback, callbackUrl);
+              return;
+            }
+          }
+
+          setNotice(
+            ap.notice,
+            errorMessage || 'OAuth 자동 인증이 실패했습니다. callback URL을 붙여넣어 수동 완료해주세요.',
+            'error'
+          );
+        }
+
+        async function authenticateProviderConnection(providerId, apiKey) {
+          const normalizedProviderId = String(providerId || '').trim();
+          const normalizedApiKey = String(apiKey || '').trim();
+          if (!normalizedProviderId || !normalizedApiKey) {
+            setNotice(ap.notice, 'provider와 API Key를 모두 입력하세요.', 'error');
+            return;
+          }
+
+          try {
+            const response = await requestJson(`/api/provider-auth/${encodeURIComponent(normalizedProviderId)}/authenticate`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                apiKey: normalizedApiKey,
+              }),
+            });
+            state.providerAuth.activeAuthProviderId = null;
+            await Promise.all([refreshProviderAuth(), refreshModelCatalog()]);
+            const providerName = response?.provider?.displayName || 'provider';
+            const modelCount = Number(response?.verifiedModels || 0);
+            setNotice(ap.notice, `${providerName} 인증 완료 (모델 ${modelCount}개 확인)`, 'success');
+          } catch (error) {
+            setNotice(ap.notice, `인증 실패: ${error.message}`, 'error');
+          }
+        }
+
+        async function disconnectProviderConnection(providerId) {
+          const normalizedProviderId = String(providerId || '').trim();
+          if (!normalizedProviderId) {
+            return;
+          }
+
+          try {
+            await requestJson(`/api/provider-auth/${encodeURIComponent(normalizedProviderId)}/disconnect`, {
+              method: 'POST',
+            });
+            clearProviderOAuthState(normalizedProviderId);
+            state.providerAuth.activeAuthProviderId = null;
+            await Promise.all([refreshProviderAuth(), refreshModelCatalog()]);
+            setNotice(ap.notice, '연결이 해제되었습니다.', 'info');
+          } catch (error) {
+            setNotice(ap.notice, `연결 해제 실패: ${error.message}`, 'error');
+          }
+        }
+
+        function initializeProviderAuthPanel() {
+          renderProviderAuthList();
+          renderAgentModelCatalog();
+
+          window.addEventListener('message', async (event) => {
+            const payload = event?.data;
+            if (!payload || typeof payload !== 'object') {
+              return;
+            }
+            const messageType = String(payload.type || '').trim();
+            if (!messageType) {
+              return;
+            }
+
+            if (messageType === 'provider-oauth-complete') {
+              await handleOAuthAutoCompletePayload(payload);
+              return;
+            }
+
+            if (messageType === 'provider-oauth-callback') {
+              const callbackUrl = String(payload.callbackUrl || '').trim();
+              if (!callbackUrl) {
+                return;
+              }
+              await handleOAuthPopupCallback(callbackUrl);
+            }
+          });
+
+          ap.providerList?.addEventListener('click', async (event) => {
+            const targetButton = event.target.closest('button[data-action]');
+            if (!targetButton) {
+              return;
+            }
+
+            const action = String(targetButton.dataset.action || '');
+            const providerId = String(targetButton.dataset.providerId || '').trim();
+            if (!providerId) {
+              return;
+            }
+
+            if (action === 'open-auth') {
+              state.providerAuth.activeAuthProviderId = providerId;
+              renderProviderAuthList();
+              const provider = findProviderConnection(providerId);
+              const authMode = String(provider?.authMode || '').trim().toLowerCase();
+              if (authMode === 'oauth') {
+                await startProviderOAuth(providerId, { openWindow: true });
+              }
+              return;
+            }
+            if (action === 'cancel-auth') {
+              state.providerAuth.activeAuthProviderId = null;
+              renderProviderAuthList();
+              return;
+            }
+            if (action === 'start-oauth') {
+              await startProviderOAuth(providerId, { openWindow: true });
+              return;
+            }
+            if (action === 'disconnect-provider') {
+              await disconnectProviderConnection(providerId);
+            }
+          });
+
+          ap.providerList?.addEventListener('submit', async (event) => {
+            const form = event.target.closest('form[data-auth-form="true"]');
+            if (!form) {
+              return;
+            }
+            event.preventDefault();
+            const providerId = String(form.dataset.providerId || '').trim();
+            const authMode = String(form.dataset.authMode || 'api_key').trim().toLowerCase();
+            if (authMode === 'oauth') {
+              const input = form.querySelector('input[name="callbackInput"]');
+              const callbackInput = String(input?.value || '').trim();
+              await completeProviderOAuth(providerId, callbackInput);
+              if (input) {
+                input.value = '';
+              }
+              return;
+            }
+
+            const apiKeyInput = form.querySelector('input[name="apiKey"]');
+            const apiKey = String(apiKeyInput?.value || '').trim();
+            await authenticateProviderConnection(providerId, apiKey);
+            if (apiKeyInput) {
+              apiKeyInput.value = '';
+            }
           });
         }
 
@@ -2500,7 +3212,7 @@
 
         async function createAgent() {
           const name = ac.name.value.trim();
-          const modelTier = 'Balanced (default)';
+          const modelTier = String(ac.modelSelect?.value || 'Balanced (default)').trim() || 'Balanced (default)';
           const systemPrompt = ac.prompt.value.trim();
           const skills = getSelectedSkills();
           const avatarUrl = state.selectedAvatar?.url || null;
@@ -2600,7 +3312,13 @@
             if (auth.password) {
               auth.password.value = '';
             }
-            await Promise.all([refreshAgents(), refreshSkills(), drawRandomAvatar()]);
+            await Promise.all([
+              refreshAgents(),
+              refreshSkills(),
+              refreshProviderAuth(),
+              refreshModelCatalog(),
+              drawRandomAvatar(),
+            ]);
             startPolling();
           } catch (error) {
             if (error.status === 429) {
@@ -2649,6 +3367,7 @@
           if (initializedPanels) {
             return;
           }
+          initializeProviderAuthPanel();
           initializeDataProcessingPanel();
           initializeDeploymentStudio();
           initializedPanels = true;
@@ -2665,7 +3384,13 @@
             const user = await refreshMe();
             if (user) {
               showAppShell();
-              await Promise.all([refreshAgents(), refreshSkills(), drawRandomAvatar()]);
+              await Promise.all([
+                refreshAgents(),
+                refreshSkills(),
+                refreshProviderAuth(),
+                refreshModelCatalog(),
+                drawRandomAvatar(),
+              ]);
               startPolling();
               return;
             }

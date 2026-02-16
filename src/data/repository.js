@@ -79,6 +79,34 @@ function toRefreshTokenResponse(row) {
   };
 }
 
+function normalizeProvider(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+}
+
+function toProviderAuthResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    provider: row.provider,
+    displayName: row.display_name ?? row.displayName ?? row.provider,
+    authMode: row.auth_mode ?? row.authMode ?? "api_key",
+    status: row.status ?? "pending",
+    secretEncrypted: row.secret_encrypted ?? row.secretEncrypted ?? null,
+    meta: row.meta_json ?? row.meta ?? {},
+    models: row.models_json ?? row.models ?? [],
+    lastCheckedAt: row.last_checked_at ?? row.lastCheckedAt ?? null,
+    errorMessage: row.error_message ?? row.errorMessage ?? null,
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+  };
+}
+
 class InMemoryRepository {
   constructor() {
     this.ontologyFields = new Map();
@@ -90,6 +118,8 @@ class InMemoryRepository {
     this.users = new Map();
     this.userIdsByEmail = new Map();
     this.refreshTokens = new Map();
+    this.providerAuthConnections = new Map();
+    this.providerAuthIdsByProvider = new Map();
   }
 
   async init() {}
@@ -361,6 +391,125 @@ class InMemoryRepository {
     return deepClone(job);
   }
 
+  async upsertProviderAuthConnection({ provider, displayName, authMode = "api_key" }) {
+    const normalizedProvider = normalizeProvider(provider);
+    if (!normalizedProvider) {
+      throw new Error("provider is required");
+    }
+
+    const existingId = this.providerAuthIdsByProvider.get(normalizedProvider);
+    if (existingId) {
+      const existing = this.providerAuthConnections.get(existingId);
+      if (!existing) {
+        this.providerAuthIdsByProvider.delete(normalizedProvider);
+      } else {
+        const nextDisplayName = String(displayName || "").trim();
+        if (nextDisplayName && nextDisplayName !== existing.displayName) {
+          existing.displayName = nextDisplayName;
+          existing.updatedAt = new Date().toISOString();
+          this.providerAuthConnections.set(existing.id, existing);
+        }
+        return deepClone(existing);
+      }
+    }
+
+    const now = new Date().toISOString();
+    const record = {
+      id: crypto.randomUUID(),
+      provider: normalizedProvider,
+      displayName: String(displayName || normalizedProvider.toUpperCase()).trim() || normalizedProvider.toUpperCase(),
+      authMode: String(authMode || "api_key").trim().toLowerCase() || "api_key",
+      status: "pending",
+      secretEncrypted: null,
+      meta: {},
+      models: [],
+      lastCheckedAt: null,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.providerAuthConnections.set(record.id, record);
+    this.providerAuthIdsByProvider.set(normalizedProvider, record.id);
+    return deepClone(record);
+  }
+
+  async listProviderAuthConnections(limit = 100) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    const items = Array.from(this.providerAuthConnections.values())
+      .sort((a, b) => a.provider.localeCompare(b.provider))
+      .slice(0, safeLimit);
+    return items.map((item) => deepClone(item));
+  }
+
+  async getProviderAuthConnection(connectionId) {
+    const record = this.providerAuthConnections.get(String(connectionId || ""));
+    return record ? deepClone(record) : null;
+  }
+
+  async getProviderAuthConnectionByProvider(provider) {
+    const normalizedProvider = normalizeProvider(provider);
+    const recordId = this.providerAuthIdsByProvider.get(normalizedProvider);
+    if (!recordId) {
+      return null;
+    }
+    return this.getProviderAuthConnection(recordId);
+  }
+
+  async updateProviderAuthConnection(connectionId, patch = {}) {
+    const key = String(connectionId || "");
+    const current = this.providerAuthConnections.get(key);
+    if (!current) {
+      return null;
+    }
+
+    const next = {
+      ...current,
+      displayName:
+        patch.displayName !== undefined
+          ? String(patch.displayName || "").trim() || current.displayName
+          : current.displayName,
+      authMode:
+        patch.authMode !== undefined
+          ? String(patch.authMode || "").trim().toLowerCase() || current.authMode
+          : current.authMode,
+      status:
+        patch.status !== undefined
+          ? String(patch.status || "").trim().toLowerCase() || current.status
+          : current.status,
+      secretEncrypted:
+        patch.secretEncrypted !== undefined
+          ? String(patch.secretEncrypted || "").trim() || null
+          : current.secretEncrypted,
+      meta:
+        patch.meta !== undefined
+          ? patch.meta && typeof patch.meta === "object"
+            ? deepClone(patch.meta)
+            : {}
+          : current.meta,
+      models:
+        patch.models !== undefined
+          ? Array.isArray(patch.models)
+            ? deepClone(patch.models)
+            : []
+          : current.models,
+      lastCheckedAt:
+        patch.lastCheckedAt !== undefined
+          ? patch.lastCheckedAt
+            ? new Date(patch.lastCheckedAt).toISOString()
+            : null
+          : current.lastCheckedAt,
+      errorMessage:
+        patch.errorMessage !== undefined
+          ? String(patch.errorMessage || "").trim() || null
+          : current.errorMessage,
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.providerAuthConnections.set(key, next);
+    return deepClone(next);
+  }
+
   async createAgent({ name, modelTier, systemPrompt, tools, skills, avatarUrl }) {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
@@ -577,6 +726,23 @@ class PostgresRepository {
         user_agent TEXT,
         ip_address TEXT,
         created_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS provider_auth_connections (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        auth_mode TEXT NOT NULL DEFAULT 'api_key',
+        status TEXT NOT NULL DEFAULT 'pending',
+        secret_encrypted TEXT,
+        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        last_checked_at TIMESTAMPTZ,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
       );
     `);
   }
@@ -1083,6 +1249,155 @@ class PostgresRepository {
     );
 
     return rows.length > 0 ? toJobResponse(rows[0]) : null;
+  }
+
+  async upsertProviderAuthConnection({ provider, displayName, authMode = "api_key" }) {
+    const normalizedProvider = normalizeProvider(provider);
+    if (!normalizedProvider) {
+      throw new Error("provider is required");
+    }
+
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const normalizedDisplayName =
+      String(displayName || normalizedProvider.toUpperCase()).trim() || normalizedProvider.toUpperCase();
+    const normalizedAuthMode = String(authMode || "api_key").trim().toLowerCase() || "api_key";
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO provider_auth_connections (
+        id, provider, display_name, auth_mode, status, secret_encrypted, meta_json, models_json, last_checked_at, error_message, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, 'pending', NULL, '{}'::jsonb, '[]'::jsonb, NULL, NULL, $5::timestamptz, $5::timestamptz)
+      ON CONFLICT (provider)
+      DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        auth_mode = EXCLUDED.auth_mode,
+        updated_at = NOW()
+      RETURNING id, provider, display_name, auth_mode, status, secret_encrypted, meta_json, models_json, last_checked_at, error_message, created_at, updated_at
+      `,
+      [id, normalizedProvider, normalizedDisplayName, normalizedAuthMode, now]
+    );
+
+    return toProviderAuthResponse(rows[0]);
+  }
+
+  async listProviderAuthConnections(limit = 100) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, provider, display_name, auth_mode, status, secret_encrypted, meta_json, models_json, last_checked_at, error_message, created_at, updated_at
+      FROM provider_auth_connections
+      ORDER BY provider ASC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+    return rows.map((row) => toProviderAuthResponse(row));
+  }
+
+  async getProviderAuthConnection(connectionId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, provider, display_name, auth_mode, status, secret_encrypted, meta_json, models_json, last_checked_at, error_message, created_at, updated_at
+      FROM provider_auth_connections
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [String(connectionId || "")]
+    );
+    return rows.length > 0 ? toProviderAuthResponse(rows[0]) : null;
+  }
+
+  async getProviderAuthConnectionByProvider(provider) {
+    const normalizedProvider = normalizeProvider(provider);
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, provider, display_name, auth_mode, status, secret_encrypted, meta_json, models_json, last_checked_at, error_message, created_at, updated_at
+      FROM provider_auth_connections
+      WHERE provider = $1
+      LIMIT 1
+      `,
+      [normalizedProvider]
+    );
+    return rows.length > 0 ? toProviderAuthResponse(rows[0]) : null;
+  }
+
+  async updateProviderAuthConnection(connectionId, patch = {}) {
+    const current = await this.getProviderAuthConnection(connectionId);
+    if (!current) {
+      return null;
+    }
+
+    const nextDisplayName =
+      patch.displayName !== undefined
+        ? String(patch.displayName || "").trim() || current.displayName
+        : current.displayName;
+    const nextAuthMode =
+      patch.authMode !== undefined
+        ? String(patch.authMode || "").trim().toLowerCase() || current.authMode
+        : current.authMode;
+    const nextStatus =
+      patch.status !== undefined
+        ? String(patch.status || "").trim().toLowerCase() || current.status
+        : current.status;
+    const nextSecretEncrypted =
+      patch.secretEncrypted !== undefined
+        ? String(patch.secretEncrypted || "").trim() || null
+        : current.secretEncrypted;
+    const nextMeta =
+      patch.meta !== undefined
+        ? patch.meta && typeof patch.meta === "object"
+          ? patch.meta
+          : {}
+        : current.meta;
+    const nextModels =
+      patch.models !== undefined
+        ? Array.isArray(patch.models)
+          ? patch.models
+          : []
+        : current.models;
+    const nextLastCheckedAt =
+      patch.lastCheckedAt !== undefined
+        ? patch.lastCheckedAt
+          ? new Date(patch.lastCheckedAt).toISOString()
+          : null
+        : current.lastCheckedAt;
+    const nextErrorMessage =
+      patch.errorMessage !== undefined
+        ? String(patch.errorMessage || "").trim() || null
+        : current.errorMessage;
+
+    const { rows } = await this.pool.query(
+      `
+      UPDATE provider_auth_connections
+      SET
+        display_name = $2,
+        auth_mode = $3,
+        status = $4,
+        secret_encrypted = $5,
+        meta_json = $6::jsonb,
+        models_json = $7::jsonb,
+        last_checked_at = $8::timestamptz,
+        error_message = $9,
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, provider, display_name, auth_mode, status, secret_encrypted, meta_json, models_json, last_checked_at, error_message, created_at, updated_at
+      `,
+      [
+        current.id,
+        nextDisplayName,
+        nextAuthMode,
+        nextStatus,
+        nextSecretEncrypted,
+        JSON.stringify(nextMeta || {}),
+        JSON.stringify(nextModels || []),
+        nextLastCheckedAt,
+        nextErrorMessage,
+      ]
+    );
+
+    return rows.length > 0 ? toProviderAuthResponse(rows[0]) : null;
   }
 
   async createAgent({ name, modelTier, systemPrompt, tools, skills, avatarUrl }) {
