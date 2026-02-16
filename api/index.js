@@ -2,14 +2,12 @@ process.env.RUNTIME_MODE = "serverless";
 
 const { app, bootstrap } = require("../server");
 
-const ready = bootstrap({
-  startQueue: false,
-  startServer: false,
-});
-
 module.exports = async (req, res) => {
   try {
-    await ready;
+    await bootstrap({
+      startQueue: false,
+      startServer: false,
+    });
     return app(req, res);
   } catch (error) {
     console.error("Serverless bootstrap failed:", error);

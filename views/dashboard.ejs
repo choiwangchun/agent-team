@@ -573,6 +573,14 @@
           el.classList.remove('hidden');
         }
 
+        function clearNotice(el) {
+          if (!el) {
+            return;
+          }
+          el.textContent = '';
+          el.classList.add('hidden');
+        }
+
         function setAuthNotice(message, type = 'info') {
           if (!auth.notice) {
             return;
@@ -942,6 +950,51 @@
             image.decoding = 'async';
             image.src = targetUrl;
           });
+        }
+
+        function isServerInitializationError(error) {
+          const errorCode = String(error?.payload?.error || '')
+            .trim()
+            .toLowerCase();
+          const message = String(error?.message || '')
+            .trim()
+            .toLowerCase();
+          return (
+            errorCode === 'bootstrap_failed' ||
+            message.includes('server initialization failed')
+          );
+        }
+
+        function clearAvatarNoticeIfNeeded() {
+          if (!ac.notice || ac.notice.classList.contains('hidden')) {
+            return;
+          }
+          const text = String(ac.notice.textContent || '');
+          if (
+            text.startsWith('아바타 로드 실패:') ||
+            text.includes('서버 초기화 중입니다')
+          ) {
+            clearNotice(ac.notice);
+          }
+        }
+
+        async function fetchRandomAvatarWithRetry(maxAttempts = 2) {
+          const attempts = Math.max(1, Number(maxAttempts) || 1);
+          let lastError = null;
+
+          for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            try {
+              return await requestJson('/api/avatars/random');
+            } catch (error) {
+              lastError = error;
+              if (!isServerInitializationError(error) || attempt >= attempts) {
+                throw error;
+              }
+              await wait(180 * attempt);
+            }
+          }
+
+          throw lastError || new Error('avatar request failed');
         }
 
         function renderDataFeatures() {
@@ -2064,17 +2117,27 @@
             return;
           }
 
+          const previousAvatar = state.selectedAvatar;
           const startedAt = Date.now();
           setAvatarLoading(true);
           try {
-            const response = await requestJson('/api/avatars/random');
+            const response = await fetchRandomAvatarWithRetry(2);
             const nextAvatar = response.avatar || null;
             if (nextAvatar?.url) {
               await preloadImage(nextAvatar.url);
             }
             renderSelectedAvatar(nextAvatar);
+            clearAvatarNoticeIfNeeded();
           } catch (error) {
-            renderSelectedAvatar(null);
+            if (!previousAvatar?.url) {
+              renderSelectedAvatar(null);
+            }
+            if (isServerInitializationError(error)) {
+              if (!previousAvatar?.url) {
+                setNotice(ac.notice, '서버 초기화 중입니다. 잠시 후 다시 시도해주세요.', 'info');
+              }
+              return;
+            }
             setNotice(ac.notice, `아바타 로드 실패: ${error.message}`, 'error');
           } finally {
             const elapsed = Date.now() - startedAt;
