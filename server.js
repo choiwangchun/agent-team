@@ -602,6 +602,7 @@ function buildWorkflowTasksFromRequest({
         }
       }
     }
+    assertWorkflowTasksAcyclic(tasks);
     return tasks;
   }
 
@@ -635,7 +636,7 @@ function buildWorkflowTasksFromRequest({
       dependsOnByTaskKey.get(toTaskKey)?.add(fromTaskKey);
     }
 
-    return nodes.map((node) => ({
+    const tasks = nodes.map((node) => ({
       taskKey: node.taskKey,
       title: node.title,
       kind: node.kind,
@@ -648,6 +649,8 @@ function buildWorkflowTasksFromRequest({
       ],
       input: node.input,
     }));
+    assertWorkflowTasksAcyclic(tasks);
+    return tasks;
   }
 
   return [
@@ -662,6 +665,44 @@ function buildWorkflowTasksFromRequest({
       },
     },
   ];
+}
+
+function assertWorkflowTasksAcyclic(tasks) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  const graph = new Map();
+  for (const task of list) {
+    const key = String(task?.taskKey || "").trim();
+    if (!key) {
+      continue;
+    }
+    graph.set(key, normalizeStringArray(task?.dependsOnTaskKeys));
+  }
+
+  const visiting = new Set();
+  const visited = new Set();
+
+  const visit = (key) => {
+    if (visited.has(key)) {
+      return;
+    }
+    if (visiting.has(key)) {
+      throw new Error(`workflow dependency cycle detected: ${key}`);
+    }
+    visiting.add(key);
+    const deps = graph.get(key) || [];
+    for (const dep of deps) {
+      if (!graph.has(dep)) {
+        continue;
+      }
+      visit(dep);
+    }
+    visiting.delete(key);
+    visited.add(key);
+  };
+
+  for (const key of graph.keys()) {
+    visit(key);
+  }
 }
 
 function toPosixPath(value) {
@@ -4887,7 +4928,7 @@ app.post("/api/workflows", ...requireOperatorRole, async (req, res) => {
       goal,
       datasetId,
       selectedFeatures,
-      createdBy: req.authUser?.id || null,
+      createdBy: AUTH_DISABLED ? null : req.authUser?.id || null,
       tasks,
       meta,
     });

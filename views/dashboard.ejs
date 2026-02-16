@@ -371,26 +371,45 @@
       </article>
 
       <article class="rounded-2xl border border-slate-100 bg-slate-50 p-5">
-        <h3 class="font-semibold text-slate-900">명령창</h3>
-        <p class="mt-1 text-sm text-slate-500">명령을 입력하면 agent 실행 로그처럼 콘솔 형태로 출력됩니다.</p>
+        <h3 class="font-semibold text-slate-900">워크플로 실행</h3>
+        <p class="mt-1 text-sm text-slate-500">배치한 노드 그래프와 목표를 기준으로 workflow를 실행합니다.</p>
+        <label class="mt-3 block text-sm">
+          <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Goal</span>
+          <textarea
+            id="adGoalInput"
+            rows="3"
+            placeholder="예: Q3 수출금융 데이터를 정리하고 핵심 인사이트 리포트를 만들어줘"
+            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
+          ></textarea>
+        </label>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            id="adStartWorkflowBtn"
+            type="button"
+            class="rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            워크플로 시작
+          </button>
+          <button
+            id="adTickWorkflowBtn"
+            type="button"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            한 단계 실행
+          </button>
+          <button
+            id="adRefreshWorkflowBtn"
+            type="button"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            상태 새로고침
+          </button>
+          <p id="adWorkflowMeta" class="text-xs text-slate-500">아직 실행된 workflow가 없습니다.</p>
+        </div>
         <pre
           id="adCommandLog"
           class="mt-3 h-44 overflow-auto rounded-xl border border-slate-200 bg-[#0b1221] p-3 font-mono text-xs text-[#d9e5ff]"
-        >[system] help, list nodes, list edges, connect node-1 node-2, clear</pre>
-        <form id="adCommandForm" class="mt-3 flex flex-row flex-nowrap items-center gap-2">
-          <input
-            id="adCommandInput"
-            type="text"
-            placeholder="예: list nodes"
-            class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
-          />
-          <button
-            type="submit"
-            class="shrink-0 whitespace-nowrap rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 min-w-[84px]"
-          >
-            실행
-          </button>
-        </form>
+        >[system] 목표를 입력하고 '워크플로 시작'을 눌러주세요.</pre>
       </article>
     </div>
 
@@ -606,7 +625,12 @@
           deploymentStudio: {
             nodes: [],
             edges: [],
-            logs: ['[system] help, list nodes, list edges, connect node-1 node-2, clear'],
+            logs: ['[system] 목표를 입력하고 워크플로를 시작하세요.'],
+            workflowEvents: [],
+            activeWorkflowId: null,
+            activeWorkflowStatus: 'idle',
+            activeWorkflowGoal: '',
+            activeWorkflowTaskCounts: null,
             connectMode: false,
             pendingFromNodeId: null,
             selectedNodeId: null,
@@ -693,16 +717,21 @@
           assignAllNodeFeaturesBtn: document.getElementById('adAssignAllNodeFeaturesBtn'),
           clearNodeFeaturesBtn: document.getElementById('adClearNodeFeaturesBtn'),
           agentSourceList: document.getElementById('adAgentSourceList'),
+          goalInput: document.getElementById('adGoalInput'),
+          startWorkflowBtn: document.getElementById('adStartWorkflowBtn'),
+          tickWorkflowBtn: document.getElementById('adTickWorkflowBtn'),
+          refreshWorkflowBtn: document.getElementById('adRefreshWorkflowBtn'),
+          workflowMeta: document.getElementById('adWorkflowMeta'),
           commandLog: document.getElementById('adCommandLog'),
-          commandForm: document.getElementById('adCommandForm'),
-          commandInput: document.getElementById('adCommandInput'),
         };
 
         let refreshingData = false;
         let refreshingAgents = false;
         let refreshingProviderAuth = false;
         let refreshingModelCatalog = false;
+        let refreshingWorkflow = false;
         let pollTimer = null;
+        let workflowPollTimer = null;
 
         function getStatusBadge(status) {
           const map = {
@@ -2892,10 +2921,241 @@
             second: '2-digit',
           });
           state.deploymentStudio.logs.push(`[${now}] ${message}`);
-          state.deploymentStudio.logs = state.deploymentStudio.logs.slice(-200);
-          if (ad.commandLog) {
-            ad.commandLog.textContent = state.deploymentStudio.logs.join('\n');
-            ad.commandLog.scrollTop = ad.commandLog.scrollHeight;
+          state.deploymentStudio.logs = state.deploymentStudio.logs.slice(-240);
+          renderStudioLog();
+        }
+
+        function formatWorkflowEventForLog(event) {
+          const date = new Date(event?.createdAt || Date.now());
+          const timestamp = Number.isNaN(date.getTime())
+            ? '--:--:--'
+            : date.toLocaleTimeString('ko-KR', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            });
+          const role = String(event?.role || 'agent').trim() || 'agent';
+          const message = String(event?.message || '').trim() || '-';
+          const taskId = String(event?.taskId || '').trim();
+          const taskPart = taskId ? `(${taskId.slice(0, 6)}) ` : '';
+          return `[${timestamp}] ${role}: ${taskPart}${message}`;
+        }
+
+        function renderStudioLog() {
+          if (!ad.commandLog) {
+            return;
+          }
+          const localLogs = Array.isArray(state.deploymentStudio.logs)
+            ? state.deploymentStudio.logs
+            : [];
+          const workflowEvents = Array.isArray(state.deploymentStudio.workflowEvents)
+            ? state.deploymentStudio.workflowEvents
+            : [];
+          const workflowLines = workflowEvents.map((event) => formatWorkflowEventForLog(event));
+          const lines = [
+            ...localLogs,
+            ...(workflowLines.length > 0 ? ['[workflow] ----------------'] : []),
+            ...workflowLines,
+          ];
+          ad.commandLog.textContent = lines.slice(-360).join('\n');
+          ad.commandLog.scrollTop = ad.commandLog.scrollHeight;
+        }
+
+        function renderWorkflowMeta() {
+          if (!ad.workflowMeta) {
+            return;
+          }
+          const workflowId = String(state.deploymentStudio.activeWorkflowId || '').trim();
+          const status = String(state.deploymentStudio.activeWorkflowStatus || 'idle').trim();
+          if (!workflowId) {
+            ad.workflowMeta.textContent = '아직 실행된 workflow가 없습니다.';
+            return;
+          }
+          const counts = state.deploymentStudio.activeWorkflowTaskCounts || {};
+          const total = Math.max(0, Number(counts.total) || 0);
+          const completed = Math.max(0, Number(counts.completed) || 0);
+          const failed = Math.max(0, Number(counts.failed) || 0);
+          ad.workflowMeta.textContent = `workflow ${workflowId.slice(0, 8)} · ${status} · 완료 ${completed}/${total} · 실패 ${failed}`;
+        }
+
+        function isWorkflowTerminal(statusRaw) {
+          const status = String(statusRaw || '').trim().toLowerCase();
+          return status === 'completed' || status === 'failed' || status === 'cancelled';
+        }
+
+        function setWorkflowButtonsBusy(isBusy) {
+          const disabled = Boolean(isBusy);
+          [
+            ad.startWorkflowBtn,
+            ad.tickWorkflowBtn,
+            ad.refreshWorkflowBtn,
+          ].forEach((button) => {
+            if (!button) {
+              return;
+            }
+            button.disabled = disabled;
+            button.classList.toggle('opacity-60', disabled);
+          });
+        }
+
+        function collectWorkflowFeatureScope() {
+          const nodeFeatures = [];
+          for (const node of state.deploymentStudio.nodes) {
+            const features = Array.isArray(node?.features) ? node.features : [];
+            for (const feature of features) {
+              const normalized = String(feature || '').trim();
+              if (normalized) {
+                nodeFeatures.push(normalized);
+              }
+            }
+          }
+          const fromNodes = [...new Set(nodeFeatures)];
+          if (fromNodes.length > 0) {
+            return fromNodes;
+          }
+          return Array.isArray(state.dataProcessing.features)
+            ? [...new Set(state.dataProcessing.features.map((item) => String(item || '').trim()).filter(Boolean))]
+            : [];
+        }
+
+        function buildWorkflowNodePayload() {
+          return state.deploymentStudio.nodes.map((node) => ({
+            id: node.id,
+            agentId: node.agentId,
+            name: getNodeTitle(node),
+            kind: 'general',
+            input: {
+              features: getNodeFeatures(node),
+            },
+          }));
+        }
+
+        function buildWorkflowEdgePayload() {
+          return state.deploymentStudio.edges.map((edge) => ({
+            from: edge.from,
+            to: edge.to,
+          }));
+        }
+
+        function applyWorkflowPayload(workflow) {
+          if (!workflow || typeof workflow !== 'object') {
+            return;
+          }
+          state.deploymentStudio.activeWorkflowId = String(workflow.id || '').trim() || null;
+          state.deploymentStudio.activeWorkflowStatus = String(workflow.status || 'pending').trim() || 'pending';
+          state.deploymentStudio.activeWorkflowGoal = String(workflow.goal || '').trim();
+          state.deploymentStudio.activeWorkflowTaskCounts =
+            workflow.taskCounts && typeof workflow.taskCounts === 'object'
+              ? workflow.taskCounts
+              : null;
+          state.deploymentStudio.workflowEvents = Array.isArray(workflow.events)
+            ? workflow.events
+            : [];
+          if (ad.goalInput && state.deploymentStudio.activeWorkflowGoal) {
+            ad.goalInput.value = state.deploymentStudio.activeWorkflowGoal;
+          }
+          renderWorkflowMeta();
+          renderStudioLog();
+        }
+
+        async function refreshActiveWorkflow({ silent = false } = {}) {
+          const workflowId = String(state.deploymentStudio.activeWorkflowId || '').trim();
+          if (!workflowId || refreshingWorkflow) {
+            return;
+          }
+          refreshingWorkflow = true;
+          try {
+            const response = await requestJson(`/api/workflows/${encodeURIComponent(workflowId)}?eventLimit=300`);
+            applyWorkflowPayload(response.workflow);
+            if (isWorkflowTerminal(state.deploymentStudio.activeWorkflowStatus)) {
+              stopWorkflowPolling();
+            }
+          } catch (error) {
+            if (!silent) {
+              setNotice(ad.notice, `workflow 상태 조회 실패: ${error.message}`, 'error');
+            }
+          } finally {
+            refreshingWorkflow = false;
+          }
+        }
+
+        function startWorkflowPolling() {
+          if (workflowPollTimer) {
+            return;
+          }
+          workflowPollTimer = setInterval(() => {
+            refreshActiveWorkflow({ silent: true }).catch(() => {});
+          }, 1500);
+        }
+
+        function stopWorkflowPolling() {
+          if (!workflowPollTimer) {
+            return;
+          }
+          clearInterval(workflowPollTimer);
+          workflowPollTimer = null;
+        }
+
+        async function startWorkflowFromStudio() {
+          const goal = String(ad.goalInput?.value || '').trim();
+          if (!goal) {
+            setNotice(ad.notice, 'workflow 목표를 입력하세요.', 'error');
+            return;
+          }
+          if (!Array.isArray(state.deploymentStudio.nodes) || state.deploymentStudio.nodes.length === 0) {
+            setNotice(ad.notice, '캔버스에 Agent 노드를 먼저 배치하세요.', 'error');
+            return;
+          }
+
+          const nodes = buildWorkflowNodePayload();
+          const edges = buildWorkflowEdgePayload();
+          const selectedFeatures = collectWorkflowFeatureScope();
+          setWorkflowButtonsBusy(true);
+          try {
+            const response = await requestJson('/api/workflows', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                goal,
+                nodes,
+                edges,
+                selectedFeatures,
+              }),
+            });
+            applyWorkflowPayload(response.workflow);
+            setNotice(ad.notice, `workflow 시작: ${String(response.workflow?.id || '').slice(0, 8)}`, 'success');
+            pushStudioLog(`workflow 시작: ${String(response.workflow?.id || '').slice(0, 8)}`);
+            if (!isWorkflowTerminal(state.deploymentStudio.activeWorkflowStatus)) {
+              startWorkflowPolling();
+            }
+          } catch (error) {
+            setNotice(ad.notice, `workflow 시작 실패: ${error.message}`, 'error');
+          } finally {
+            setWorkflowButtonsBusy(false);
+          }
+        }
+
+        async function tickWorkflowFromStudio() {
+          const workflowId = String(state.deploymentStudio.activeWorkflowId || '').trim();
+          if (!workflowId) {
+            setNotice(ad.notice, '먼저 workflow를 시작하세요.', 'info');
+            return;
+          }
+          setWorkflowButtonsBusy(true);
+          try {
+            const response = await requestJson(`/api/workflows/${encodeURIComponent(workflowId)}/tick`, {
+              method: 'POST',
+            });
+            applyWorkflowPayload(response.workflow);
+            if (!isWorkflowTerminal(state.deploymentStudio.activeWorkflowStatus)) {
+              startWorkflowPolling();
+            } else {
+              stopWorkflowPolling();
+            }
+          } catch (error) {
+            setNotice(ad.notice, `workflow 실행 실패: ${error.message}`, 'error');
+          } finally {
+            setWorkflowButtonsBusy(false);
           }
         }
 
@@ -3122,64 +3382,6 @@
           pushStudioLog('캔버스 초기화 완료');
         }
 
-        function executeStudioCommand(commandRaw) {
-          const command = String(commandRaw || '').trim();
-          if (!command) {
-            return;
-          }
-          pushStudioLog(`$ ${command}`);
-
-          const parts = command.split(/\s+/);
-          const base = parts[0]?.toLowerCase();
-          const sub = parts[1]?.toLowerCase();
-
-          if (base === 'help') {
-            pushStudioLog('명령어: help | list nodes | list edges | connect <fromNodeId> <toNodeId> | clear');
-            return;
-          }
-
-          if (base === 'list' && sub === 'nodes') {
-            if (state.deploymentStudio.nodes.length === 0) {
-              pushStudioLog('nodes: []');
-              return;
-            }
-            for (const node of state.deploymentStudio.nodes) {
-              const features = getNodeFeatures(node);
-              pushStudioLog(`${node.id} => ${getNodeTitle(node)} @ (${node.x}, ${node.y}) features=[${features.join(', ')}]`);
-            }
-            return;
-          }
-
-          if (base === 'list' && sub === 'edges') {
-            if (state.deploymentStudio.edges.length === 0) {
-              pushStudioLog('edges: []');
-              return;
-            }
-            for (const edge of state.deploymentStudio.edges) {
-              pushStudioLog(`${edge.from} -> ${edge.to}`);
-            }
-            return;
-          }
-
-          if (base === 'connect' && parts.length >= 3) {
-            const fromNodeId = parts[1];
-            const toNodeId = parts[2];
-            if (!getNodeById(fromNodeId) || !getNodeById(toNodeId)) {
-              pushStudioLog('노드 ID를 찾을 수 없습니다.');
-              return;
-            }
-            addEdgeToStudio(fromNodeId, toNodeId);
-            return;
-          }
-
-          if (base === 'clear') {
-            clearStudio();
-            return;
-          }
-
-          pushStudioLog(`알 수 없는 명령어: ${command}`);
-        }
-
         function renderAgentSourceList(agents) {
           if (!ad.agentSourceList) {
             return;
@@ -3268,6 +3470,31 @@
           }
         }
 
+        async function restoreLatestWorkflow() {
+          try {
+            const response = await requestJson('/api/workflows?limit=1');
+            const workflows = Array.isArray(response?.workflows) ? response.workflows : [];
+            const latest = workflows[0];
+            if (!latest?.id) {
+              return;
+            }
+            state.deploymentStudio.activeWorkflowId = String(latest.id).trim();
+            state.deploymentStudio.activeWorkflowStatus = String(latest.status || 'pending').trim();
+            state.deploymentStudio.activeWorkflowGoal = String(latest.goal || '').trim();
+            state.deploymentStudio.activeWorkflowTaskCounts =
+              latest.taskCounts && typeof latest.taskCounts === 'object'
+                ? latest.taskCounts
+                : null;
+            renderWorkflowMeta();
+            await refreshActiveWorkflow({ silent: true });
+            if (!isWorkflowTerminal(state.deploymentStudio.activeWorkflowStatus)) {
+              startWorkflowPolling();
+            }
+          } catch {
+            // ignore latest workflow restore errors
+          }
+        }
+
         async function drawRandomAvatar() {
           if (state.ui.avatarLoading) {
             return;
@@ -3308,6 +3535,9 @@
         function initializeDeploymentStudio() {
           renderDeploymentFeaturePool();
           renderStudioNodes();
+          renderWorkflowMeta();
+          renderStudioLog();
+          setWorkflowButtonsBusy(false);
           let studioDrag = null;
           let suppressNodeClickOnce = false;
 
@@ -3546,14 +3776,16 @@
             setNodeFeatures(selectedNode.id, []);
           });
 
-          ad.commandForm?.addEventListener('submit', (event) => {
-            event.preventDefault();
-            const command = ad.commandInput?.value || '';
-            executeStudioCommand(command);
-            if (ad.commandInput) {
-              ad.commandInput.value = '';
-              ad.commandInput.focus();
-            }
+          ad.startWorkflowBtn?.addEventListener('click', async () => {
+            await startWorkflowFromStudio();
+          });
+
+          ad.tickWorkflowBtn?.addEventListener('click', async () => {
+            await tickWorkflowFromStudio();
+          });
+
+          ad.refreshWorkflowBtn?.addEventListener('click', async () => {
+            await refreshActiveWorkflow();
           });
         }
 
@@ -3705,10 +3937,12 @@
 
         function stopPolling() {
           if (!pollTimer) {
+            stopWorkflowPolling();
             return;
           }
           clearInterval(pollTimer);
           pollTimer = null;
+          stopWorkflowPolling();
         }
 
         async function refreshMe() {
@@ -3751,6 +3985,7 @@
             refreshProviderAuth(),
             refreshModelCatalog(),
             drawRandomAvatar(),
+            restoreLatestWorkflow(),
           ]);
           startPolling();
         }
