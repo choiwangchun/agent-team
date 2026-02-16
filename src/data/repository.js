@@ -1,4 +1,6 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const { Pool } = require("pg");
 
 function deepClone(value) {
@@ -107,8 +109,31 @@ function toProviderAuthResponse(row) {
   };
 }
 
+function toDataAiRunResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.user_id ?? row.userId,
+    model: row.model,
+    command: row.command,
+    sourceName: row.source_name ?? row.sourceName ?? null,
+    action: row.action ?? "analyze",
+    inputRowCount: row.input_row_count ?? row.inputRowCount ?? 0,
+    outputRowCount: row.output_row_count ?? row.outputRowCount ?? 0,
+    stats: row.stats_json ?? row.stats ?? {},
+    report: row.report_text ?? row.report ?? "",
+    preview: row.preview_json ?? row.preview ?? {},
+    cleanedRows: row.cleaned_rows_json ?? row.cleanedRows ?? [],
+    createdAt: row.created_at ?? row.createdAt,
+    expiresAt: row.expires_at ?? row.expiresAt,
+  };
+}
+
 class InMemoryRepository {
-  constructor() {
+  constructor(options = {}) {
     this.ontologyFields = new Map();
     this.columnOverrides = new Map();
     this.datasets = new Map();
@@ -120,12 +145,90 @@ class InMemoryRepository {
     this.refreshTokens = new Map();
     this.providerAuthConnections = new Map();
     this.providerAuthIdsByProvider = new Map();
+    this.dataAiRuns = new Map();
+
+    this.persistEnabled = Boolean(options.persistEnabled);
+    this.stateFilePath = this.persistEnabled
+      ? String(options.stateFilePath || "").trim()
+      : "";
+
+    if (this.persistEnabled && this.stateFilePath) {
+      this.loadPersistedState();
+    }
   }
 
   async init() {}
 
   type() {
     return "memory";
+  }
+
+  loadPersistedState() {
+    if (!this.persistEnabled || !this.stateFilePath) {
+      return;
+    }
+
+    try {
+      if (!fs.existsSync(this.stateFilePath)) {
+        return;
+      }
+
+      const raw = fs.readFileSync(this.stateFilePath, "utf8");
+      if (!raw.trim()) {
+        return;
+      }
+
+      const parsed = JSON.parse(raw);
+      const connections = Array.isArray(parsed?.providerAuthConnections)
+        ? parsed.providerAuthConnections
+        : [];
+
+      this.providerAuthConnections.clear();
+      this.providerAuthIdsByProvider.clear();
+
+      for (const row of connections) {
+        const record = toProviderAuthResponse(row);
+        if (!record?.id || !record?.provider) {
+          continue;
+        }
+        this.providerAuthConnections.set(record.id, deepClone(record));
+        this.providerAuthIdsByProvider.set(record.provider, record.id);
+      }
+    } catch (error) {
+      console.warn(
+        `[repository] failed to load memory state (${this.stateFilePath}): ${
+          error?.message || String(error)
+        }`
+      );
+    }
+  }
+
+  persistState() {
+    if (!this.persistEnabled || !this.stateFilePath) {
+      return;
+    }
+
+    const snapshot = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      providerAuthConnections: Array.from(this.providerAuthConnections.values()).map((item) =>
+        deepClone(item)
+      ),
+    };
+
+    try {
+      const dir = path.dirname(this.stateFilePath);
+      fs.mkdirSync(dir, { recursive: true });
+      const tmpPath = `${this.stateFilePath}.tmp-${process.pid}-${Date.now()}`;
+      fs.writeFileSync(tmpPath, JSON.stringify(snapshot, null, 2), "utf8");
+      fs.renameSync(tmpPath, this.stateFilePath);
+    } catch (error) {
+      console.warn(
+        `[repository] failed to persist memory state (${this.stateFilePath}): ${
+          error?.message || String(error)
+        }`
+      );
+    }
   }
 
   async createUser({ email, passwordHash, name, role, status = "active" }) {
@@ -408,6 +511,7 @@ class InMemoryRepository {
           existing.displayName = nextDisplayName;
           existing.updatedAt = new Date().toISOString();
           this.providerAuthConnections.set(existing.id, existing);
+          this.persistState();
         }
         return deepClone(existing);
       }
@@ -431,6 +535,7 @@ class InMemoryRepository {
 
     this.providerAuthConnections.set(record.id, record);
     this.providerAuthIdsByProvider.set(normalizedProvider, record.id);
+    this.persistState();
     return deepClone(record);
   }
 
@@ -507,6 +612,7 @@ class InMemoryRepository {
     };
 
     this.providerAuthConnections.set(key, next);
+    this.persistState();
     return deepClone(next);
   }
 
@@ -594,6 +700,59 @@ class InMemoryRepository {
     deployment.updatedAt = new Date().toISOString();
     this.deployments.set(deploymentId, deployment);
     return deepClone(deployment);
+  }
+
+  async purgeExpiredDataAiRuns() {
+    const now = Date.now();
+    for (const [runId, run] of this.dataAiRuns.entries()) {
+      const expiresAtMs = new Date(run.expiresAt).getTime();
+      if (Number.isFinite(expiresAtMs) && expiresAtMs <= now) {
+        this.dataAiRuns.delete(runId);
+      }
+    }
+  }
+
+  async createDataAiRun({
+    userId,
+    model,
+    command,
+    sourceName = null,
+    action = "analyze",
+    inputRowCount = 0,
+    outputRowCount = 0,
+    stats = {},
+    report = "",
+    preview = {},
+    cleanedRows = [],
+    createdAt = new Date().toISOString(),
+    expiresAt,
+  }) {
+    await this.purgeExpiredDataAiRuns();
+    const record = {
+      id: crypto.randomUUID(),
+      userId: String(userId || "").trim(),
+      model: String(model || "").trim(),
+      command: String(command || "").trim(),
+      sourceName: sourceName ? String(sourceName).trim() : null,
+      action: String(action || "analyze").trim() || "analyze",
+      inputRowCount: Math.max(0, Number(inputRowCount) || 0),
+      outputRowCount: Math.max(0, Number(outputRowCount) || 0),
+      stats: stats && typeof stats === "object" ? deepClone(stats) : {},
+      report: String(report || "").trim(),
+      preview: preview && typeof preview === "object" ? deepClone(preview) : {},
+      cleanedRows: Array.isArray(cleanedRows) ? deepClone(cleanedRows) : [],
+      createdAt: new Date(createdAt).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+
+    this.dataAiRuns.set(record.id, record);
+    return deepClone(record);
+  }
+
+  async getDataAiRun(runId) {
+    await this.purgeExpiredDataAiRuns();
+    const run = this.dataAiRuns.get(String(runId || "").trim());
+    return run ? deepClone(run) : null;
   }
 }
 
@@ -744,6 +903,30 @@ class PostgresRepository {
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
       );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS data_ai_runs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        command TEXT NOT NULL,
+        source_name TEXT,
+        action TEXT NOT NULL,
+        input_row_count INTEGER NOT NULL,
+        output_row_count INTEGER NOT NULL,
+        stats_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        report_text TEXT NOT NULL DEFAULT '',
+        preview_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        cleaned_rows_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_data_ai_runs_expires_at
+      ON data_ai_runs (expires_at);
     `);
   }
 
@@ -1624,13 +1807,103 @@ class PostgresRepository {
       updatedAt: row.updated_at,
     };
   }
+
+  async purgeExpiredDataAiRuns() {
+    await this.pool.query(
+      `
+      DELETE FROM data_ai_runs
+      WHERE expires_at <= NOW()
+      `
+    );
+  }
+
+  async createDataAiRun({
+    userId,
+    model,
+    command,
+    sourceName = null,
+    action = "analyze",
+    inputRowCount = 0,
+    outputRowCount = 0,
+    stats = {},
+    report = "",
+    preview = {},
+    cleanedRows = [],
+    createdAt = new Date().toISOString(),
+    expiresAt,
+  }) {
+    await this.purgeExpiredDataAiRuns();
+    const runId = crypto.randomUUID();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO data_ai_runs (
+        id, user_id, model, command, source_name, action, input_row_count, output_row_count,
+        stats_json, report_text, preview_json, cleaned_rows_json, created_at, expires_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9::jsonb, $10, $11::jsonb, $12::jsonb, $13::timestamptz, $14::timestamptz
+      )
+      RETURNING id, user_id, model, command, source_name, action, input_row_count, output_row_count,
+                stats_json, report_text, preview_json, cleaned_rows_json, created_at, expires_at
+      `,
+      [
+        runId,
+        String(userId || "").trim(),
+        String(model || "").trim(),
+        String(command || "").trim(),
+        sourceName ? String(sourceName).trim() : null,
+        String(action || "analyze").trim() || "analyze",
+        Math.max(0, Number(inputRowCount) || 0),
+        Math.max(0, Number(outputRowCount) || 0),
+        JSON.stringify(stats && typeof stats === "object" ? stats : {}),
+        String(report || "").trim(),
+        JSON.stringify(preview && typeof preview === "object" ? preview : {}),
+        JSON.stringify(Array.isArray(cleanedRows) ? cleanedRows : []),
+        new Date(createdAt).toISOString(),
+        new Date(expiresAt).toISOString(),
+      ]
+    );
+
+    return toDataAiRunResponse(rows[0]);
+  }
+
+  async getDataAiRun(runId) {
+    await this.purgeExpiredDataAiRuns();
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, user_id, model, command, source_name, action, input_row_count, output_row_count,
+             stats_json, report_text, preview_json, cleaned_rows_json, created_at, expires_at
+      FROM data_ai_runs
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [String(runId || "").trim()]
+    );
+
+    return rows.length > 0 ? toDataAiRunResponse(rows[0]) : null;
+  }
 }
 
 function createRepository() {
   if (process.env.DATABASE_URL) {
     return new PostgresRepository(process.env.DATABASE_URL);
   }
-  return new InMemoryRepository();
+
+  const persistEnabledRaw = String(
+    process.env.MEMORY_REPO_PERSIST || (process.env.NODE_ENV === "test" ? "false" : "true")
+  )
+    .trim()
+    .toLowerCase();
+  const persistEnabled = persistEnabledRaw !== "false";
+  const configuredStateFile = String(process.env.MEMORY_REPO_STATE_FILE || "").trim();
+  const stateFilePath =
+    configuredStateFile || path.join(process.cwd(), ".cache", "memory-repository.json");
+
+  return new InMemoryRepository({
+    persistEnabled,
+    stateFilePath,
+  });
 }
 
 module.exports = {

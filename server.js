@@ -13,6 +13,18 @@ const { monitorEventLoopDelay, performance } = require("perf_hooks");
 const { OntologyService } = require("./src/ontology/service");
 const { createRepository } = require("./src/data/repository");
 const { IngestionJobQueue } = require("./src/pipeline/job-queue");
+const {
+  buildModelInputSummary,
+  buildTablePreview,
+  buildRowsDiffPreview,
+  collectColumns,
+  deriveActionFromCommand,
+  parseModelTransformPlan,
+  applyModelTransformPlan,
+  rowsToCsv,
+  sanitizeExecutionRows,
+} = require("./src/data/ai-processing");
+const { runPythonDataTransform } = require("./src/data/python-transformer");
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -52,6 +64,10 @@ const AUTH_BOOTSTRAP_PASSWORD = String(
 ).trim();
 const AUTH_BOOTSTRAP_NAME = String(process.env.AUTH_BOOTSTRAP_NAME || "Owner").trim();
 const AUTH_BOOTSTRAP_ROLE = String(process.env.AUTH_BOOTSTRAP_ROLE || "owner").trim();
+const AUTH_DISABLED =
+  String(process.env.AUTH_DISABLED || "true")
+    .trim()
+    .toLowerCase() !== "false";
 const LOGIN_WINDOW_MS = Math.max(
   5000,
   Number(process.env.LOGIN_WINDOW_MS || 60 * 1000)
@@ -91,6 +107,48 @@ const PROVIDER_AUTH_MODELS_LIMIT = Math.max(
   5,
   Number(process.env.PROVIDER_AUTH_MODELS_LIMIT || 120)
 );
+const DATA_AI_MAX_ROWS = Math.max(
+  100,
+  Number(process.env.DATA_AI_MAX_ROWS || 5000)
+);
+const DATA_AI_MAX_COLUMNS = Math.max(
+  5,
+  Number(process.env.DATA_AI_MAX_COLUMNS || 120)
+);
+const DATA_AI_CELL_MAX_LENGTH = Math.max(
+  64,
+  Number(process.env.DATA_AI_CELL_MAX_LENGTH || 2048)
+);
+const DATA_AI_SAMPLE_ROWS = Math.max(
+  8,
+  Number(process.env.DATA_AI_SAMPLE_ROWS || 40)
+);
+const DATA_AI_RUN_TTL_SEC = Math.max(
+  300,
+  Number(process.env.DATA_AI_RUN_TTL_SEC || 30 * 60)
+);
+const DATA_AI_MODEL_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.DATA_AI_MODEL_TIMEOUT_MS || 45000)
+);
+const DATA_AI_PYTHON_TOOL_ENABLED =
+  String(
+    process.env.DATA_AI_PYTHON_TOOL_ENABLED ||
+      (isServerlessRuntime ? "false" : "true")
+  )
+    .trim()
+    .toLowerCase() !== "false";
+const DATA_AI_PYTHON_BIN =
+  String(process.env.DATA_AI_PYTHON_BIN || "python3").trim() || "python3";
+const DATA_AI_PYTHON_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.DATA_AI_PYTHON_TIMEOUT_MS || 20000)
+);
+const DATA_AI_PYTHON_SCRIPT =
+  String(
+    process.env.DATA_AI_PYTHON_SCRIPT ||
+      path.join(process.cwd(), "scripts", "data_transformer.py")
+  ).trim() || path.join(process.cwd(), "scripts", "data_transformer.py");
 const PROVIDER_OAUTH_CHALLENGE_TTL_SEC = Math.max(
   120,
   Number(process.env.PROVIDER_OAUTH_CHALLENGE_TTL_SEC || 10 * 60)
@@ -121,6 +179,18 @@ const OPENAI_CODEX_OAUTH_SCOPE = String(
     "openid profile email offline_access"
 ).trim();
 const OPENAI_CODEX_ACCOUNT_CLAIM_PATH = "https://api.openai.com/auth";
+const OPENAI_API_BASE_URL = String(
+  process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1"
+)
+  .trim()
+  .replace(/\/+$/, "");
+const OPENAI_CODEX_RESPONSES_URL = String(
+  process.env.OPENAI_CODEX_RESPONSES_URL ||
+    "https://chatgpt.com/backend-api/codex/responses"
+).trim();
+const OPENAI_CODEX_ORIGINATOR = String(
+  process.env.OPENAI_CODEX_ORIGINATOR || "pi"
+).trim() || "pi";
 const OAUTH_CALLBACK_BRIDGE_ENABLED = String(
   process.env.OAUTH_CALLBACK_BRIDGE_ENABLED || "true"
 ).trim().toLowerCase() !== "false";
@@ -876,6 +946,31 @@ function encryptProviderSecret(secret) {
   )}:${encrypted.toString("base64")}`;
 }
 
+function decryptProviderSecret(secretEncrypted) {
+  const encoded = String(secretEncrypted || "").trim();
+  if (!encoded) {
+    return null;
+  }
+
+  const [version, ivB64, authTagB64, encryptedB64] = encoded.split(":");
+  if (version !== "v1" || !ivB64 || !authTagB64 || !encryptedB64) {
+    throw new Error("invalid encrypted provider secret format");
+  }
+
+  const iv = Buffer.from(ivB64, "base64");
+  const authTag = Buffer.from(authTagB64, "base64");
+  const encrypted = Buffer.from(encryptedB64, "base64");
+
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    getProviderAuthEncryptionKey(),
+    iv
+  );
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  return decrypted.toString("utf8");
+}
+
 function toBase64Url(input) {
   if (input === null || input === undefined) {
     return "";
@@ -1511,7 +1606,7 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = PROVIDER_AUTH
 
 async function verifyOpenAIProvider(apiKey) {
   const { response, payload } = await fetchJsonWithTimeout(
-    "https://api.openai.com/v1/models",
+    `${OPENAI_API_BASE_URL}/models`,
     {
       method: "GET",
       headers: {
@@ -1654,6 +1749,31 @@ async function verifyProviderOAuth({
     redirectUri: challenge.redirectUri || OPENAI_CODEX_OAUTH_REDIRECT_URI,
   });
   const accountId = getOpenAICodexAccountId(token.access);
+  let discoveredModels = [];
+  try {
+    const verified = await verifyOpenAIProvider(token.access);
+    discoveredModels = Array.isArray(verified?.models)
+      ? verified.models
+          .map((item) => String(item?.id || "").trim())
+          .filter(Boolean)
+          .map((id) => ({ provider: "openai", id, label: id }))
+      : [];
+  } catch {
+    discoveredModels = [];
+  }
+
+  const modelMap = new Map();
+  for (const model of [...getOpenAICodexModels(), ...discoveredModels]) {
+    const entry = normalizeProviderModelEntry("openai", model);
+    if (!entry) {
+      continue;
+    }
+    modelMap.set(entry.value, {
+      provider: entry.provider,
+      id: entry.modelId,
+      label: entry.label,
+    });
+  }
 
   return {
     secret: {
@@ -1664,7 +1784,7 @@ async function verifyProviderOAuth({
       expires: token.expires,
       accountId,
     },
-    models: getOpenAICodexModels(),
+    models: Array.from(modelMap.values()),
     meta: {
       mode: "oauth",
       flow: "openai-codex-pkce",
@@ -1674,8 +1794,1212 @@ async function verifyProviderOAuth({
       scope: token.scope,
       expiresAt: new Date(token.expires).toISOString(),
       expiresIn: token.expiresIn,
+      discoveredModelCount: discoveredModels.length,
     },
   };
+}
+
+function parseModelSelectionValue(modelRaw) {
+  const value = String(modelRaw || "").trim();
+  if (!value) {
+    return {
+      provider: "",
+      modelId: "",
+      value: "",
+    };
+  }
+
+  if (!value.includes("/")) {
+    return {
+      provider: normalizeProviderId(value),
+      modelId: value,
+      value,
+    };
+  }
+
+  const [providerRaw, ...rest] = value.split("/");
+  return {
+    provider: normalizeProviderId(providerRaw),
+    modelId: rest.join("/").trim(),
+    value,
+  };
+}
+
+function buildOpenAIModelCandidateIds(modelId) {
+  const source = String(modelId || "").trim();
+  if (!source) {
+    return [];
+  }
+
+  const candidates = [];
+  const push = (value) => {
+    const item = String(value || "").trim();
+    if (!item || candidates.includes(item)) {
+      return;
+    }
+    candidates.push(item);
+  };
+
+  push(source);
+  push(source.replace(/-spark$/i, ""));
+  push(
+    source
+      .replace(/-codex-(mini|max)$/i, "")
+      .replace(/-codex$/i, "")
+  );
+  push(
+    source
+      .replace(/-codex$/i, "")
+      .replace(/-spark$/i, "")
+  );
+
+  const withoutCodex = source
+    .replace(/-codex-(mini|max)$/i, "")
+    .replace(/-codex$/i, "");
+  const versionMatch = withoutCodex.match(/^(gpt-\d+(?:\.\d+)?)/i);
+  if (versionMatch) {
+    push(versionMatch[1]);
+    const majorMatch = versionMatch[1].match(/^(gpt-\d+)/i);
+    if (majorMatch) {
+      push(majorMatch[1]);
+    }
+  }
+
+  return candidates;
+}
+
+function pickPreferredOpenAIModel(modelIds) {
+  const list = (Array.isArray(modelIds) ? modelIds : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (list.length === 0) {
+    return "";
+  }
+
+  const startsWith = (prefix) =>
+    list.find((item) => item.toLowerCase().startsWith(prefix));
+
+  return (
+    startsWith("gpt-5") ||
+    startsWith("o3") ||
+    startsWith("o4") ||
+    startsWith("gpt-4.1") ||
+    startsWith("gpt-4o") ||
+    list[0]
+  );
+}
+
+function buildOpenAICodexFallbackModelIds(requestedModelId, discoveredModelIds = []) {
+  const list = [];
+  const push = (value) => {
+    const item = String(value || "").trim();
+    if (!item || list.includes(item)) {
+      return;
+    }
+    list.push(item);
+  };
+
+  const requested = String(requestedModelId || "").trim();
+  if (requested) {
+    push(requested);
+    push(requested.replace(/-spark$/i, ""));
+  }
+
+  for (const modelId of Array.isArray(discoveredModelIds) ? discoveredModelIds : []) {
+    push(modelId);
+  }
+
+  for (const model of getOpenAICodexModels()) {
+    push(model.id);
+  }
+
+  push("gpt-5.3-codex");
+  push("gpt-5.2-codex");
+  push("gpt-5.1-codex-max");
+  push("gpt-5.1-codex-mini");
+  push("gpt-5.1");
+
+  return list;
+}
+
+async function fetchOpenAIAvailableModelIds(accessToken) {
+  const secret = String(accessToken || "").trim();
+  if (!secret) {
+    return [];
+  }
+
+  const { response, payload } = await fetchJsonWithTimeout(
+    `${OPENAI_API_BASE_URL}/models`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+      },
+    },
+    DATA_AI_MODEL_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      sanitizeModelErrorMessage(
+        payload,
+        response.status,
+        `OpenAI model list request failed (${response.status})`
+      )
+    );
+  }
+
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  return rows
+    .map((item) => String(item?.id || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function resolveRequestedOpenAIModel({
+  requestedModelId,
+  availableModelIds,
+}) {
+  const requested = String(requestedModelId || "").trim();
+  const available = new Set(
+    (Array.isArray(availableModelIds) ? availableModelIds : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  );
+
+  if (!requested) {
+    const fallback = pickPreferredOpenAIModel(Array.from(available));
+    return {
+      modelId: fallback,
+      changed: Boolean(fallback),
+      reason: fallback ? "default_from_available_models" : "requested_model_empty",
+    };
+  }
+
+  if (available.size === 0) {
+    let heuristicFallback = requested;
+    if (requested.toLowerCase().includes("codex")) {
+      const candidates = buildOpenAIModelCandidateIds(requested);
+      const nonCodexCandidates = candidates.filter(
+        (candidate) =>
+          candidate !== requested && !candidate.toLowerCase().includes("codex")
+      );
+      heuristicFallback =
+        [
+          "gpt-4o-mini",
+          "gpt-4.1-mini",
+          "gpt-4o",
+          ...nonCodexCandidates,
+        ].find(Boolean) || "gpt-4o-mini";
+    }
+    return {
+      modelId: heuristicFallback || requested,
+      changed: Boolean(heuristicFallback && heuristicFallback !== requested),
+      reason: "available_models_unknown_use_heuristic",
+    };
+  }
+
+  const candidates = buildOpenAIModelCandidateIds(requested);
+  for (const candidate of candidates) {
+    if (available.has(candidate)) {
+      return {
+        modelId: candidate,
+        changed: candidate !== requested,
+        reason: candidate !== requested ? "fallback_candidate_match" : "requested_model_available",
+      };
+    }
+  }
+
+  const fallback = pickPreferredOpenAIModel(Array.from(available));
+  return {
+    modelId: fallback || requested,
+    changed: Boolean(fallback && fallback !== requested),
+    reason: fallback ? "fallback_preferred_available_model" : "requested_model_not_available",
+  };
+}
+
+function parseProviderSecretPayload(connection) {
+  if (!connection?.secretEncrypted) {
+    throw new Error("provider credential is missing");
+  }
+  const decrypted = decryptProviderSecret(connection.secretEncrypted);
+  if (!decrypted) {
+    throw new Error("provider credential is empty");
+  }
+  try {
+    return JSON.parse(decrypted);
+  } catch {
+    throw new Error("provider credential format is invalid");
+  }
+}
+
+function parseOpenAIOAuthSecret(connection) {
+  const payload = parseProviderSecretPayload(connection);
+  if (!payload || payload.type !== "oauth") {
+    throw new Error("openai oauth credential is invalid");
+  }
+
+  const access = String(payload.access || "").trim();
+  const refresh = String(payload.refresh || "").trim();
+  const expires = Number(payload.expires || 0);
+  const accountId = payload.accountId ? String(payload.accountId) : null;
+
+  if (!access || !refresh || !Number.isFinite(expires) || expires <= 0) {
+    throw new Error("openai oauth credential is incomplete");
+  }
+
+  return {
+    access,
+    refresh,
+    expires,
+    accountId,
+  };
+}
+
+async function refreshOpenAIOAuthAccessToken(refreshToken) {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: OPENAI_CODEX_OAUTH_CLIENT_ID,
+    refresh_token: String(refreshToken || "").trim(),
+  });
+
+  const { response, payload } = await fetchJsonWithTimeout(
+    OPENAI_CODEX_OAUTH_TOKEN_URL,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body,
+    },
+    DATA_AI_MODEL_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    const detail =
+      payload?.error_description ||
+      payload?.error ||
+      payload?.message ||
+      `OpenAI OAuth refresh failed (${response.status})`;
+    throw new Error(detail);
+  }
+
+  const access = String(payload?.access_token || "").trim();
+  const refresh = String(payload?.refresh_token || "").trim();
+  const expiresIn = Number(payload?.expires_in || 0);
+
+  if (!access || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error("OpenAI OAuth refresh response is invalid");
+  }
+
+  return {
+    access,
+    refresh,
+    expires: Date.now() + expiresIn * 1000,
+    expiresIn,
+    tokenType: String(payload?.token_type || "").trim() || null,
+    scope: String(payload?.scope || "").trim() || null,
+    accountId: getOpenAICodexAccountId(access),
+  };
+}
+
+async function ensureOpenAIOAuthAccessToken(connection) {
+  const secret = parseOpenAIOAuthSecret(connection);
+  const now = Date.now();
+  const renewThresholdMs = 90 * 1000;
+  if (secret.expires - now > renewThresholdMs) {
+    return {
+      accessToken: secret.access,
+      credential: secret,
+      refreshed: false,
+    };
+  }
+
+  const refreshed = await refreshOpenAIOAuthAccessToken(secret.refresh);
+  const nextSecret = {
+    type: "oauth",
+    provider: "openai",
+    access: refreshed.access,
+    refresh: refreshed.refresh || secret.refresh,
+    expires: refreshed.expires,
+    accountId: refreshed.accountId || secret.accountId || null,
+  };
+
+  await repository.updateProviderAuthConnection(connection.id, {
+    status: "connected",
+    secretEncrypted: encryptProviderSecret(JSON.stringify(nextSecret)),
+    lastCheckedAt: new Date().toISOString(),
+    errorMessage: null,
+    meta: {
+      ...(connection.meta && typeof connection.meta === "object"
+        ? connection.meta
+        : {}),
+      mode: "oauth",
+      refreshedAt: new Date().toISOString(),
+      tokenType: refreshed.tokenType,
+      scope: refreshed.scope,
+      expiresAt: new Date(refreshed.expires).toISOString(),
+      expiresIn: refreshed.expiresIn,
+      accountId: nextSecret.accountId,
+    },
+  });
+
+  return {
+    accessToken: nextSecret.access,
+    credential: nextSecret,
+    refreshed: true,
+  };
+}
+
+function extractModelTextFromResponsePayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  if (Array.isArray(payload.output)) {
+    for (const item of payload.output) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      if (Array.isArray(item.content)) {
+        const textParts = item.content
+          .map((entry) => {
+            if (typeof entry?.text === "string") {
+              return entry.text;
+            }
+            if (
+              entry?.type === "output_text" &&
+              typeof entry?.text === "string"
+            ) {
+              return entry.text;
+            }
+            return "";
+          })
+          .filter(Boolean);
+        if (textParts.length > 0) {
+          return textParts.join("\n").trim();
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(payload.choices) && payload.choices.length > 0) {
+    const first = payload.choices[0];
+    const content = first?.message?.content;
+    if (typeof content === "string" && content.trim()) {
+      return content.trim();
+    }
+    if (Array.isArray(content)) {
+      const text = content
+        .map((entry) =>
+          typeof entry?.text === "string" ? entry.text : ""
+        )
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      if (text) {
+        return text;
+      }
+    }
+  }
+
+  return "";
+}
+
+function sanitizeModelErrorMessage(payload, statusCode, fallback) {
+  const payloadMessage =
+    payload?.error?.message ||
+    payload?.error_description ||
+    payload?.message ||
+    "";
+  const text = String(payloadMessage || fallback || "").trim();
+  const lower = text.toLowerCase();
+  if (lower.includes("missing scopes") || lower.includes("insufficient permissions")) {
+    if (lower.includes("api.responses.write")) {
+      return "OpenAI 권한 부족: Responses API 쓰기 권한(api.responses.write)이 없습니다. OpenAI 프로젝트 권한(Member/Owner, Writer 이상) 확인 후 OAuth를 다시 인증하거나 openai-codex 모델을 선택하세요.";
+    }
+    if (lower.includes("api.chat.completions.write")) {
+      return "OpenAI 권한 부족: Chat Completions 쓰기 권한(api.chat.completions.write)이 없습니다. OpenAI 프로젝트 권한(Member/Owner, Writer 이상) 확인 후 OAuth를 다시 인증하거나 openai-codex 모델을 선택하세요.";
+    }
+    return "OpenAI 권한 부족: 현재 계정/프로젝트 역할이 쓰기 권한을 갖지 않아 요청이 거부되었습니다. OpenAI 프로젝트 권한과 OAuth 인증을 다시 확인하거나 openai-codex 모델을 사용하세요.";
+  }
+  if (text) {
+    return text.slice(0, 240);
+  }
+  return `model request failed (${statusCode})`;
+}
+
+function buildDataModelPrompts({ command, action, summary }) {
+  const normalizedAction = ["analyze", "clean", "format"].includes(
+    String(action || "").trim().toLowerCase()
+  )
+    ? String(action || "").trim().toLowerCase()
+    : "analyze";
+  const mutationRequested = normalizedAction !== "analyze";
+  const systemPrompt = [
+    "You are a data engineering assistant.",
+    "Return ONLY a JSON object.",
+    "Decide data transformations from the user command and sample rows.",
+    "Write report in Korean.",
+    "In report, answer the user's question directly in the first sentence.",
+    "In report, include what data you inspected (rows/columns/samples) and key findings.",
+    "If no transformation is applied, clearly state that no data was modified and why.",
+    "If the user asks about column values, list observed values (and counts when possible).",
+    "Allowed operation types:",
+    "rename_column, trim_whitespace, normalize_empty_to_null, value_map, parse_number, normalize_date, drop_columns.",
+    "Do not invent operation types.",
+    mutationRequested
+      ? "The user requested data modification. Return action as clean or format and include concrete operations."
+      : "If the command is analysis-only, return empty operations and a concise report.",
+  ].join(" ");
+
+  const userPrompt = JSON.stringify(
+    {
+      task: command,
+      action: normalizedAction,
+      mutationRequested,
+      requiredOutput: {
+        action: "analyze|clean|format",
+        report:
+          "Korean report. first sentence must directly answer user's question. include inspected scope, key findings, and changed/not-changed reason. if asking column values, include observed values and counts.",
+        operations: [
+          {
+            type: "rename_column|trim_whitespace|normalize_empty_to_null|value_map|parse_number|normalize_date|drop_columns",
+          },
+        ],
+      },
+      inputSummary: summary,
+    },
+    null,
+    2
+  );
+
+  return { systemPrompt, userPrompt };
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[`"'’“”]/g, "")
+    .replace(/[\s_\-./\\]+/g, "");
+}
+
+function findColumnsMentionedInCommand(command, columns) {
+  const source = normalizeSearchText(command);
+  if (!source) {
+    return [];
+  }
+
+  const matches = [];
+  for (const columnRaw of Array.isArray(columns) ? columns : []) {
+    const column = String(columnRaw || "").trim();
+    if (!column) {
+      continue;
+    }
+
+    const compact = normalizeSearchText(column);
+    if (!compact) {
+      continue;
+    }
+
+    if (source.includes(compact)) {
+      matches.push(column);
+      continue;
+    }
+
+    const words = column
+      .toLowerCase()
+      .split(/[\s_\-./\\]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (words.length > 0 && words.every((word) => source.includes(word))) {
+      matches.push(column);
+    }
+  }
+
+  return [...new Set(matches)];
+}
+
+function escapeRegexPattern(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function inferRenameOperationFromCommand(command, columns) {
+  const rawCommand = String(command || "").trim();
+  if (!rawCommand) {
+    return null;
+  }
+
+  const lower = rawCommand.toLowerCase();
+  const hasRenameIntent =
+    lower.includes("변경") ||
+    lower.includes("바꿔") ||
+    lower.includes("rename") ||
+    lower.includes("change");
+  if (!hasRenameIntent) {
+    return null;
+  }
+
+  const mentioned = findColumnsMentionedInCommand(rawCommand, columns || []);
+  if (!Array.isArray(mentioned) || mentioned.length === 0) {
+    return null;
+  }
+  const from = String(mentioned[0] || "").trim();
+  if (!from) {
+    return null;
+  }
+
+  let to = "";
+  const fromPattern = new RegExp(escapeRegexPattern(from), "i");
+  const fromMatch = rawCommand.match(fromPattern);
+  const renameAnchorMatch = rawCommand.match(/(?:으로|로)\s*(?:변경|바꿔|rename|change)/i);
+
+  if (fromMatch && renameAnchorMatch && fromMatch.index <= renameAnchorMatch.index) {
+    const fromEnd = Number(fromMatch.index) + fromMatch[0].length;
+    const targetSlice = rawCommand
+      .slice(fromEnd, renameAnchorMatch.index)
+      .replace(/^(?:\s*(?:을|를|to|into|as)\s*)/i, "")
+      .replace(/^(?:\s*그냥\s*)/i, "")
+      .trim();
+    to = targetSlice;
+  }
+
+  if (!to) {
+    const quoted =
+      rawCommand.match(/["'`]\s*([^"'`]{1,80}?)\s*["'`]\s*(?:으로|로)\s*(?:변경|바꿔|rename|change)/i) ||
+      rawCommand.match(/(?:to|as)\s*["'`]\s*([^"'`]{1,80}?)\s*["'`]/i);
+    if (quoted && quoted[1]) {
+      to = String(quoted[1]).trim();
+    }
+  }
+
+  to = String(to || "")
+    .replace(/^[\s"'`]+|[\s"'`]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!to || to.toLowerCase() === from.toLowerCase()) {
+    return null;
+  }
+
+  return {
+    type: "rename_column",
+    from,
+    to,
+  };
+}
+
+function inferFallbackOperationsFromCommand(command, action, columns) {
+  const safeAction = String(action || "analyze").trim().toLowerCase();
+  if (safeAction === "analyze") {
+    return [];
+  }
+
+  const renameOp = inferRenameOperationFromCommand(command, columns);
+  if (renameOp) {
+    return [renameOp];
+  }
+
+  return [];
+}
+
+function normalizeValueForDistribution(value) {
+  if (value === null || value === undefined) {
+    return "(empty)";
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  const text =
+    typeof value === "string"
+      ? value
+      : (() => {
+          try {
+            return JSON.stringify(value);
+          } catch {
+            return String(value);
+          }
+        })();
+
+  const normalized = String(text || "").trim();
+  return normalized ? normalized.slice(0, 80) : "(empty)";
+}
+
+function buildColumnValueDistribution(rows, column, maxDistinct = 12) {
+  const counts = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const normalized = normalizeValueForDistribution(row?.[column]);
+    counts.set(normalized, (counts.get(normalized) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .sort((a, b) => {
+      if (b[1] !== a[1]) {
+        return b[1] - a[1];
+      }
+      return String(a[0]).localeCompare(String(b[0]));
+    })
+    .slice(0, Math.max(1, Number(maxDistinct) || 12))
+    .map(([value, count]) => ({ value, count }));
+}
+
+function buildFallbackDataReport({
+  command,
+  action,
+  rows,
+  stats,
+  operations,
+}) {
+  const safeAction = String(action || "analyze").trim() || "analyze";
+  const allColumns = collectColumns(rows);
+  const inputRows = Number(stats?.inputRows) || (Array.isArray(rows) ? rows.length : 0);
+  const outputRows = Number(stats?.outputRows) || (Array.isArray(rows) ? rows.length : 0);
+  const modifiedCells = Number(stats?.modifiedCells) || 0;
+  const droppedRows = Number(stats?.droppedRows) || 0;
+  const opCount = Array.isArray(operations) ? operations.length : 0;
+
+  const lines = [];
+  lines.push(
+    `요청 기준으로 데이터를 확인했습니다. 입력 ${inputRows}행, 출력 ${outputRows}행, 컬럼 ${allColumns.length}개입니다.`
+  );
+
+  if (safeAction === "analyze") {
+    const mentionedColumns = findColumnsMentionedInCommand(command, allColumns);
+    if (mentionedColumns.length > 0) {
+      for (const column of mentionedColumns.slice(0, 2)) {
+        const distribution = buildColumnValueDistribution(rows, column, 10);
+        if (distribution.length === 0) {
+          lines.push(`\`${column}\` 컬럼은 확인 가능한 값이 없습니다.`);
+          continue;
+        }
+        const detail = distribution
+          .map((item) => `${item.value}(${item.count}건)`)
+          .join(", ");
+        lines.push(`\`${column}\` 값 분포: ${detail}`);
+      }
+    } else {
+      const previewColumns = allColumns.slice(0, 8).join(", ");
+      lines.push(
+        `질문과 정확히 매칭되는 컬럼명을 찾지 못해 전체 기준으로 분석했습니다. 주요 컬럼: ${previewColumns || "-"}.`
+      );
+    }
+  }
+
+  if (opCount > 0) {
+    lines.push(
+      `적용 액션 ${opCount}개, 변경 셀 ${modifiedCells}개, 제거 행 ${droppedRows}개가 반영되었습니다.`
+    );
+  } else {
+    lines.push("분석 전용 요청으로 데이터 값 수정은 수행하지 않았습니다.");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function sanitizeOpenAICodexErrorMessage(payload, statusCode, rawText = "") {
+  const code = String(payload?.error?.code || payload?.code || "").trim();
+  if (
+    statusCode === 429 ||
+    /usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code)
+  ) {
+    return "OpenAI Codex 사용량 한도에 도달했습니다. ChatGPT 요금제/한도를 확인한 뒤 다시 시도하세요.";
+  }
+
+  const message = String(
+    payload?.error?.message ||
+      payload?.error_description ||
+      payload?.message ||
+      rawText ||
+      ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  if (message) {
+    return message.slice(0, 240);
+  }
+  return `OpenAI Codex request failed (${statusCode})`;
+}
+
+function resolveOpenAICodexResponsesUrl() {
+  const raw = String(OPENAI_CODEX_RESPONSES_URL || "").trim();
+  if (!raw) {
+    return "https://chatgpt.com/backend-api/codex/responses";
+  }
+  if (/\/codex\/responses\/?$/i.test(raw)) {
+    return raw.replace(/\/+$/, "");
+  }
+  const normalized = raw.replace(/\/+$/, "");
+  if (/\/codex$/i.test(normalized)) {
+    return `${normalized}/responses`;
+  }
+  return `${normalized}/codex/responses`;
+}
+
+function buildOpenAICodexHeaders({ accessToken, accountId }) {
+  const token = String(accessToken || "").trim();
+  const chatgptAccountId = String(accountId || "").trim();
+  if (!token) {
+    throw new Error("openai oauth access token is required");
+  }
+  if (!chatgptAccountId) {
+    throw new Error("OpenAI Codex account id is missing. OAuth를 다시 인증하세요.");
+  }
+
+  return {
+    Authorization: `Bearer ${token}`,
+    "chatgpt-account-id": chatgptAccountId,
+    "OpenAI-Beta": "responses=experimental",
+    originator: OPENAI_CODEX_ORIGINATOR,
+    accept: "text/event-stream",
+    "content-type": "application/json",
+  };
+}
+
+async function readOpenAICodexSseOutputText(response) {
+  const reader =
+    response?.body && typeof response.body.getReader === "function"
+      ? response.body.getReader()
+      : null;
+  if (!reader) {
+    return "";
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let deltaText = "";
+  let completedText = "";
+
+  const consumeChunk = (chunk) => {
+    const dataLines = String(chunk || "")
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim());
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    const data = dataLines.join("\n").trim();
+    if (!data || data === "[DONE]") {
+      return;
+    }
+
+    let eventPayload = null;
+    try {
+      eventPayload = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (!eventPayload || typeof eventPayload !== "object") {
+      return;
+    }
+
+    const eventType = String(eventPayload?.type || "").trim().toLowerCase();
+    if (eventType === "error") {
+      const message = String(
+        eventPayload?.message ||
+          eventPayload?.error?.message ||
+          "OpenAI Codex stream error"
+      ).trim();
+      throw new Error(message || "OpenAI Codex stream error");
+    }
+    if (eventType === "response.failed") {
+      const message = String(
+        eventPayload?.response?.error?.message ||
+          eventPayload?.error?.message ||
+          "OpenAI Codex response failed"
+      ).trim();
+      throw new Error(message || "OpenAI Codex response failed");
+    }
+
+    if (
+      eventType.includes("output_text.delta") &&
+      typeof eventPayload?.delta === "string"
+    ) {
+      deltaText += eventPayload.delta;
+    }
+    if (
+      eventType.includes("output_text.done") &&
+      typeof eventPayload?.text === "string"
+    ) {
+      deltaText += eventPayload.text;
+    }
+
+    if (
+      (eventType === "response.completed" || eventType === "response.done") &&
+      eventPayload?.response
+    ) {
+      const parsed = extractModelTextFromResponsePayload(eventPayload.response);
+      if (parsed) {
+        completedText = parsed;
+      }
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let index = buffer.indexOf("\n\n");
+    while (index !== -1) {
+      const chunk = buffer.slice(0, index);
+      buffer = buffer.slice(index + 2);
+      consumeChunk(chunk);
+      index = buffer.indexOf("\n\n");
+    }
+  }
+
+  if (buffer.trim()) {
+    consumeChunk(buffer);
+  }
+
+  return String(completedText || deltaText || "").trim();
+}
+
+function extractTextFromCodexSseTranscript(rawText) {
+  const text = String(rawText || "").replace(/\r\n/g, "\n");
+  if (!text || !/(?:^|\n)\s*(?:event|data)\s*:/i.test(text)) {
+    return "";
+  }
+
+  let deltaText = "";
+  let completedText = "";
+  const chunks = text.split(/\n\n+/);
+
+  for (const chunk of chunks) {
+    const dataLines = String(chunk || "")
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim());
+    if (dataLines.length === 0) {
+      continue;
+    }
+
+    const data = dataLines.join("\n").trim();
+    if (!data || data === "[DONE]") {
+      continue;
+    }
+
+    let eventPayload = null;
+    try {
+      eventPayload = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    if (!eventPayload || typeof eventPayload !== "object") {
+      continue;
+    }
+
+    const eventType = String(eventPayload?.type || "").trim().toLowerCase();
+    if (
+      eventType.includes("output_text.delta") &&
+      typeof eventPayload?.delta === "string"
+    ) {
+      deltaText += eventPayload.delta;
+    }
+    if (
+      eventType.includes("output_text.done") &&
+      typeof eventPayload?.text === "string"
+    ) {
+      deltaText += eventPayload.text;
+    }
+    if (
+      (eventType === "response.completed" || eventType === "response.done") &&
+      eventPayload?.response
+    ) {
+      const parsed = extractModelTextFromResponsePayload(eventPayload.response);
+      if (parsed) {
+        completedText = parsed;
+      }
+    }
+  }
+
+  return String(completedText || deltaText || "").trim();
+}
+
+async function requestDataTransformPlanFromOpenAICodex({
+  accessToken,
+  accountId,
+  modelId,
+  command,
+  action,
+  summary,
+}) {
+  const { systemPrompt, userPrompt } = buildDataModelPrompts({
+    command,
+    action,
+    summary,
+  });
+
+  const headers = buildOpenAICodexHeaders({
+    accessToken,
+    accountId,
+  });
+  const codexPayload = {
+    model: modelId,
+    store: false,
+    stream: true,
+    instructions: systemPrompt,
+    input: [
+      {
+        role: "user",
+        content: [{ type: "input_text", text: userPrompt }],
+      },
+    ],
+    text: { verbosity: "medium" },
+    include: ["reasoning.encrypted_content"],
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+  };
+
+  if (typeof fetch !== "function") {
+    throw new Error("runtime fetch is unavailable");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DATA_AI_MODEL_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(resolveOpenAICodexResponsesUrl(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(codexPayload),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("OpenAI Codex request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    const rawText = await response.text().catch(() => "");
+    let payload = {};
+    try {
+      payload = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      payload = {};
+    }
+    throw new Error(
+      sanitizeOpenAICodexErrorMessage(payload, response.status, rawText)
+    );
+  }
+
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    const rawText = await response.text().catch(() => "");
+    let payload = {};
+    try {
+      payload = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      payload = {};
+    }
+    const text =
+      extractModelTextFromResponsePayload(payload) ||
+      extractTextFromCodexSseTranscript(rawText) ||
+      rawText.trim();
+    if (!text) {
+      throw new Error("model returned an empty response");
+    }
+    return text;
+  }
+
+  const text = await readOpenAICodexSseOutputText(response);
+  if (!text) {
+    throw new Error("model returned an empty response");
+  }
+  return text;
+}
+
+async function requestDataTransformPlanFromOpenAIResponsesApi({
+  accessToken,
+  modelId,
+  command,
+  action,
+  summary,
+}) {
+  const { systemPrompt, userPrompt } = buildDataModelPrompts({
+    command,
+    action,
+    summary,
+  });
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "content-type": "application/json",
+  };
+
+  const responsesPayload = {
+    model: modelId,
+    input: [
+      {
+        role: "system",
+        content: [{ type: "input_text", text: systemPrompt }],
+      },
+      {
+        role: "user",
+        content: [{ type: "input_text", text: userPrompt }],
+      },
+    ],
+    temperature: 0,
+    max_output_tokens: 1800,
+  };
+
+  const responsesResult = await fetchJsonWithTimeout(
+    `${OPENAI_API_BASE_URL}/responses`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(responsesPayload),
+    },
+    DATA_AI_MODEL_TIMEOUT_MS
+  );
+
+  if (responsesResult.response.ok) {
+    const text = extractModelTextFromResponsePayload(responsesResult.payload);
+    if (!text) {
+      throw new Error("model returned an empty response");
+    }
+    return text;
+  }
+
+  const responsesErrorText = String(
+    responsesResult.payload?.error?.message ||
+      responsesResult.payload?.message ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+  const shouldFallbackToChatCompletions =
+    responsesResult.response.status === 400 ||
+    responsesResult.response.status === 403 ||
+    responsesResult.response.status === 404 ||
+    responsesResult.response.status === 422 ||
+    responsesErrorText.includes("api.responses.write");
+
+  if (!shouldFallbackToChatCompletions) {
+    throw new Error(
+      sanitizeModelErrorMessage(
+        responsesResult.payload,
+        responsesResult.response.status,
+        "OpenAI responses API request failed"
+      )
+    );
+  }
+
+  const chatPayload = {
+    model: modelId,
+    response_format: { type: "json_object" },
+    temperature: 0,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  };
+
+  const chatResult = await fetchJsonWithTimeout(
+    `${OPENAI_API_BASE_URL}/chat/completions`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(chatPayload),
+    },
+    DATA_AI_MODEL_TIMEOUT_MS
+  );
+
+  if (!chatResult.response.ok) {
+    throw new Error(
+      sanitizeModelErrorMessage(
+        chatResult.payload,
+        chatResult.response.status,
+        "OpenAI chat completion request failed"
+      )
+    );
+  }
+
+  const text = extractModelTextFromResponsePayload(chatResult.payload);
+  if (!text) {
+    throw new Error("model returned an empty response");
+  }
+  return text;
+}
+
+async function requestDataTransformPlanFromOpenAI({
+  provider,
+  accessToken,
+  accountId,
+  modelId,
+  command,
+  action,
+  summary,
+}) {
+  const normalizedProvider = normalizeProviderId(provider);
+  if (normalizedProvider === "openai-codex") {
+    return requestDataTransformPlanFromOpenAICodex({
+      accessToken,
+      accountId,
+      modelId,
+      command,
+      action,
+      summary,
+    });
+  }
+
+  return requestDataTransformPlanFromOpenAIResponsesApi({
+    accessToken,
+    modelId,
+    command,
+    action,
+    summary,
+  });
+}
+
+function toDataRunResponse(run, { includeRows = false } = {}) {
+  if (!run) {
+    return null;
+  }
+
+  const response = {
+    id: run.id,
+    model: run.model,
+    command: run.command,
+    sourceName: run.sourceName || null,
+    action: run.action,
+    inputRowCount: run.inputRowCount,
+    outputRowCount: run.outputRowCount,
+    stats: run.stats || {},
+    report: run.report || "",
+    preview: run.preview || {},
+    createdAt: run.createdAt,
+    expiresAt: run.expiresAt,
+  };
+
+  if (includeRows) {
+    response.cleanedRows = Array.isArray(run.cleanedRows) ? run.cleanedRows : [];
+  }
+
+  return response;
+}
+
+function canAccessDataRun(run, authUser) {
+  if (!run || !authUser) {
+    return false;
+  }
+  const role = String(authUser.role || "").trim().toLowerCase();
+  if (role === "owner" || role === "admin") {
+    return true;
+  }
+  return String(run.userId || "").trim() === String(authUser.id || "").trim();
 }
 
 async function ensureDefaultProviderAuthConnections() {
@@ -1753,6 +3077,19 @@ function sanitizeUser(user) {
     status: user.status,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
+  };
+}
+
+function getAuthBypassUser() {
+  const now = new Date().toISOString();
+  return {
+    id: "auth-bypass-user",
+    email: "public@local",
+    name: "Public",
+    role: "owner",
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
@@ -1882,6 +3219,9 @@ function clearFailedLogin(rateKey) {
 }
 
 function validateAuthConfig() {
+  if (AUTH_DISABLED) {
+    return;
+  }
   if (!isProduction) {
     return;
   }
@@ -1906,6 +3246,11 @@ function validateAuthConfig() {
 }
 
 async function authenticate(req, res, next) {
+  if (AUTH_DISABLED) {
+    req.authUser = getAuthBypassUser();
+    return next();
+  }
+
   const token = extractAccessToken(req);
   if (!token) {
     return res.status(401).json({
@@ -1941,6 +3286,9 @@ async function authenticate(req, res, next) {
 }
 
 function authorizeRoles(...roles) {
+  if (AUTH_DISABLED) {
+    return (req, res, next) => next();
+  }
   const roleSet = new Set(roles.map((role) => String(role || "").trim()).filter(Boolean));
   return (req, res, next) => {
     const role = String(req.authUser?.role || "").trim();
@@ -1970,6 +3318,9 @@ function normalizeRole(value, fallback = "viewer") {
 }
 
 async function ensureBootstrapUser() {
+  if (AUTH_DISABLED) {
+    return;
+  }
   const bootstrapEmail = normalizeEmail(AUTH_BOOTSTRAP_EMAIL);
   if (!bootstrapEmail) {
     return;
@@ -2162,6 +3513,13 @@ app.get("/api/system/storage", (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
+  if (AUTH_DISABLED) {
+    return res.json({
+      user: getAuthBypassUser(),
+      authDisabled: true,
+    });
+  }
+
   const email = normalizeEmail(req.body?.email);
   const password = String(req.body?.password || "");
 
@@ -2247,6 +3605,13 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/api/auth/refresh", async (req, res) => {
+  if (AUTH_DISABLED) {
+    return res.json({
+      user: getAuthBypassUser(),
+      authDisabled: true,
+    });
+  }
+
   const refreshToken = extractRefreshToken(req);
   if (!refreshToken) {
     return res.status(401).json({
@@ -2355,6 +3720,10 @@ app.post("/api/auth/refresh", async (req, res) => {
 });
 
 app.post("/api/auth/logout", async (req, res) => {
+  if (AUTH_DISABLED) {
+    return res.json({ ok: true, authDisabled: true });
+  }
+
   const refreshToken = extractRefreshToken(req);
   try {
     if (refreshToken) {
@@ -3348,6 +4717,473 @@ app.post("/api/data/merge", ...requireOperatorRole, async (req, res) => {
       error: "merge_failed",
       message: error.message,
     });
+  }
+});
+
+app.post("/api/data/commands/execute", ...requireOperatorRole, async (req, res) => {
+  const command = String(req.body?.command || "").trim();
+  const modelRaw = String(req.body?.model || "").trim();
+  const sourceName = String(req.body?.sourceName || "").trim() || null;
+  const parsedModel = parseModelSelectionValue(modelRaw);
+
+  if (!command) {
+    return res.status(400).json({
+      error: "invalid_command",
+      message: "command is required",
+    });
+  }
+
+  if (
+    !modelRaw ||
+    !parsedModel.modelId ||
+    !["openai-codex", "openai"].includes(parsedModel.provider)
+  ) {
+    return res.status(400).json({
+      error: "invalid_model",
+      message: "OpenAI OAuth 모델(openai-codex/... 또는 openai/...)을 선택하세요.",
+    });
+  }
+
+  let table = req.body?.table ?? req.body?.rows;
+  if (typeof table === "string") {
+    try {
+      table = JSON.parse(table);
+    } catch {
+      return res.status(400).json({
+        error: "invalid_table",
+        message: "table must be valid JSON",
+      });
+    }
+  }
+
+  if (!Array.isArray(table) || table.length === 0) {
+    return res.status(400).json({
+      error: "invalid_table",
+      message: "table must be a non-empty array",
+    });
+  }
+
+  const sanitized = sanitizeExecutionRows(table, {
+    maxRows: DATA_AI_MAX_ROWS,
+    maxColumns: DATA_AI_MAX_COLUMNS,
+    maxCellLength: DATA_AI_CELL_MAX_LENGTH,
+  });
+
+  if (sanitized.totalInputRows > DATA_AI_MAX_ROWS || sanitized.truncated) {
+    return res.status(413).json({
+      error: "rows_limit_exceeded",
+      message: `table rows exceed limit (${DATA_AI_MAX_ROWS})`,
+      limit: DATA_AI_MAX_ROWS,
+      totalRows: sanitized.totalInputRows,
+    });
+  }
+
+  if (!Array.isArray(sanitized.rows) || sanitized.rows.length === 0) {
+    return res.status(400).json({
+      error: "invalid_table",
+      message: "table rows must include object columns",
+    });
+  }
+
+  const connection = await repository.getProviderAuthConnectionByProvider("openai");
+  if (!connection || connection.status !== "connected") {
+    return res.status(400).json({
+      error: "provider_not_connected",
+      message: "OPEN AI provider OAuth 인증이 필요합니다.",
+    });
+  }
+  if (String(connection.authMode || "").trim().toLowerCase() !== "oauth") {
+    return res.status(400).json({
+      error: "provider_auth_invalid",
+      message: "OPEN AI provider must use oauth auth mode",
+    });
+  }
+
+  const useCodexTransport = parsedModel.provider === "openai-codex";
+  let accessToken = "";
+  let openAIOAuthAccountId = "";
+  try {
+    const tokenResult = await ensureOpenAIOAuthAccessToken(connection);
+    accessToken = tokenResult.accessToken;
+    openAIOAuthAccountId = String(
+      tokenResult?.credential?.accountId ||
+        getOpenAICodexAccountId(tokenResult.accessToken) ||
+        ""
+    ).trim();
+  } catch (error) {
+    const message = sanitizeProviderAuthError(error);
+    try {
+      await repository.updateProviderAuthConnection(connection.id, {
+        status: "error",
+        errorMessage: message,
+        lastCheckedAt: new Date().toISOString(),
+      });
+    } catch {
+      // ignore secondary update error
+    }
+    return res.status(400).json({
+      error: "provider_auth_failed",
+      message,
+    });
+  }
+
+  const action = deriveActionFromCommand(command);
+  const summary = buildModelInputSummary(sanitized.rows, {
+    sampleRows: DATA_AI_SAMPLE_ROWS,
+    maxColumns: Math.min(DATA_AI_MAX_COLUMNS, 48),
+    maxRowsInPrompt: 40,
+    maxCellLength: 140,
+  });
+
+  const codexDiscoveredModelIds = normalizeProviderModels("openai", connection?.models)
+    .filter((entry) => entry.provider === "openai-codex")
+    .map((entry) => entry.modelId);
+
+  let availableOpenAIModelIds = [];
+  if (!useCodexTransport) {
+    try {
+      availableOpenAIModelIds = await fetchOpenAIAvailableModelIds(accessToken);
+    } catch {
+      availableOpenAIModelIds = [];
+    }
+  }
+
+  const modelResolution = useCodexTransport
+    ? {
+        modelId:
+          buildOpenAICodexFallbackModelIds(
+            parsedModel.modelId,
+            codexDiscoveredModelIds
+          )[0] || parsedModel.modelId,
+        changed: false,
+      }
+    : resolveRequestedOpenAIModel({
+        requestedModelId: parsedModel.modelId,
+        availableModelIds: availableOpenAIModelIds,
+      });
+
+  let modelIdForExecution = String(modelResolution.modelId || parsedModel.modelId).trim();
+  const modelUsedProvider = useCodexTransport ? "openai-codex" : "openai";
+  let modelAutoResolved =
+    modelIdForExecution !== parsedModel.modelId || Boolean(modelResolution.changed);
+
+  let planText = "";
+  try {
+    planText = await requestDataTransformPlanFromOpenAI({
+      provider: modelUsedProvider,
+      accessToken,
+      accountId: openAIOAuthAccountId,
+      modelId: modelIdForExecution,
+      command,
+      action,
+      summary,
+    });
+  } catch (error) {
+    const firstMessage = String(error?.message || "model execution failed")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 240);
+    const lower = firstMessage.toLowerCase();
+    const isModelAccessError =
+      lower.includes("does not exist") ||
+      lower.includes("do not have access to it") ||
+      (lower.includes("model") && lower.includes("not found"));
+
+    if (isModelAccessError) {
+      const retryModel = useCodexTransport
+        ? buildOpenAICodexFallbackModelIds(
+            modelIdForExecution,
+            codexDiscoveredModelIds
+          ).find((candidate) => candidate !== modelIdForExecution) || ""
+        : pickPreferredOpenAIModel(availableOpenAIModelIds) ||
+          (modelIdForExecution === "gpt-4o-mini" ? "gpt-4.1-mini" : "gpt-4o-mini");
+      if (retryModel && retryModel !== modelIdForExecution) {
+        try {
+          const retryPlan = await requestDataTransformPlanFromOpenAI({
+            provider: modelUsedProvider,
+            accessToken,
+            accountId: openAIOAuthAccountId,
+            modelId: retryModel,
+            command,
+            action,
+            summary,
+          });
+          planText = retryPlan;
+          modelIdForExecution = retryModel;
+          modelAutoResolved = true;
+        } catch (retryError) {
+          const retryMessage = String(retryError?.message || firstMessage)
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 240);
+          return res.status(400).json({
+            error: "model_execution_failed",
+            message: retryMessage,
+          });
+        }
+      } else {
+        return res.status(400).json({
+          error: "model_execution_failed",
+          message: firstMessage,
+        });
+      }
+    }
+
+    if (!planText) {
+      const message = firstMessage;
+
+      if (/unauthorized|invalid token|expired|refresh/i.test(message)) {
+        try {
+          await repository.updateProviderAuthConnection(connection.id, {
+            status: "error",
+            errorMessage: message,
+            lastCheckedAt: new Date().toISOString(),
+          });
+        } catch {
+          // ignore secondary update error
+        }
+      }
+
+      return res.status(400).json({
+        error: "model_execution_failed",
+        message,
+      });
+    }
+  }
+  const modelUsedValue = `${modelUsedProvider}/${modelIdForExecution}`;
+
+  let plan = parseModelTransformPlan(planText, action);
+  if (
+    (!Array.isArray(plan.operations) || plan.operations.length === 0) &&
+    plan.action !== "analyze"
+  ) {
+    const inferredOperations = inferFallbackOperationsFromCommand(
+      command,
+      plan.action,
+      sanitized.columns
+    );
+    if (inferredOperations.length > 0) {
+      plan = {
+        ...plan,
+        action: "clean",
+        operations: inferredOperations,
+        report: String(plan.report || "").trim()
+          ? `${String(plan.report || "").trim()}\n요청 문장에서 컬럼명 변경 의도를 감지해 변경 작업을 제안했습니다.`
+          : "요청 문장에서 컬럼명 변경 의도를 감지해 변경 작업을 제안했습니다.",
+      };
+    }
+  }
+  const shouldTransform =
+    plan.action !== "analyze" || (Array.isArray(plan.operations) && plan.operations.length > 0);
+
+  let finalRows = sanitized.rows;
+  let stats = {
+    inputRows: sanitized.rows.length,
+    outputRows: sanitized.rows.length,
+    modifiedCells: 0,
+    droppedRows: 0,
+    removedColumns: 0,
+    normalizedColumns: collectColumns(sanitized.rows).length,
+    operationsApplied: Array.isArray(plan.operations) ? plan.operations.length : 0,
+  };
+  let transformEngine = "javascript";
+  let transformWarning = "";
+  let transformDiagnostics = {};
+
+  if (shouldTransform) {
+    if (DATA_AI_PYTHON_TOOL_ENABLED) {
+      try {
+        const pythonTransformed = await runPythonDataTransform({
+          rows: sanitized.rows,
+          operations: Array.isArray(plan.operations) ? plan.operations : [],
+          pythonBin: DATA_AI_PYTHON_BIN,
+          timeoutMs: DATA_AI_PYTHON_TIMEOUT_MS,
+          scriptPath: DATA_AI_PYTHON_SCRIPT,
+        });
+        finalRows = Array.isArray(pythonTransformed.rows)
+          ? pythonTransformed.rows
+          : [];
+        stats = pythonTransformed.stats || stats;
+        transformEngine = "python";
+        transformDiagnostics =
+          pythonTransformed.diagnostics &&
+          typeof pythonTransformed.diagnostics === "object"
+            ? pythonTransformed.diagnostics
+            : {};
+      } catch (error) {
+        transformWarning = String(
+          error?.message || "python transform failed, javascript fallback used"
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+        const transformed = applyModelTransformPlan(sanitized.rows, plan);
+        finalRows = transformed.rows;
+        stats = transformed.stats;
+        transformEngine = "javascript_fallback";
+      }
+    } else {
+      const transformed = applyModelTransformPlan(sanitized.rows, plan);
+      finalRows = transformed.rows;
+      stats = transformed.stats;
+      transformEngine = "javascript";
+    }
+  }
+
+  stats = {
+    ...stats,
+    transformEngine,
+    transformWarning: transformWarning || null,
+    transformDurationMs:
+      Number(transformDiagnostics?.durationMs) > 0
+        ? Number(transformDiagnostics.durationMs)
+        : null,
+  };
+
+  const diff = buildRowsDiffPreview(sanitized.rows, finalRows, {
+    maxCells: 120,
+    maxRows: 80,
+    maxValueLength: 120,
+  });
+  const hasMutations =
+    Number(stats.modifiedCells || 0) > 0 ||
+    Number(stats.droppedRows || 0) > 0 ||
+    Number(stats.removedColumns || 0) > 0 ||
+    Number(stats.inputRows || 0) !== Number(stats.outputRows || 0);
+  const requiresConfirmation =
+    hasMutations && Array.isArray(plan.operations) && plan.operations.length > 0;
+  const confirmationPrompt = requiresConfirmation
+    ? `데이터 변경 제안 ${plan.operations.length}개가 생성되었습니다. diff를 확인한 뒤 적용 여부를 선택하세요.`
+    : "";
+
+  const preview = buildTablePreview(finalRows, {
+    maxRows: 20,
+    maxColumns: 16,
+  });
+  const modelReport = String(plan.report || "").trim();
+  const finalReport =
+    modelReport ||
+    buildFallbackDataReport({
+      command,
+      action: plan.action,
+      rows: finalRows,
+      stats,
+      operations: plan.operations,
+    });
+  const reportSource = modelReport ? "model" : "local_fallback";
+
+  const run = await repository.createDataAiRun({
+    userId: req.authUser?.id || "",
+    model: modelUsedValue,
+    command,
+    sourceName,
+    action: plan.action,
+    inputRowCount: stats.inputRows,
+    outputRowCount: stats.outputRows,
+    stats,
+    report: finalReport,
+    preview: {
+      columns: preview.previewColumns,
+      rows: preview.previewRows,
+      totalRows: preview.totalRows,
+      totalColumns: preview.totalColumns,
+    },
+    cleanedRows: finalRows,
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + DATA_AI_RUN_TTL_SEC * 1000).toISOString(),
+  });
+
+  return res.json({
+    runId: run.id,
+    action: run.action,
+    modelRequested: parsedModel.value,
+    modelUsed: modelUsedValue,
+    modelAutoResolved,
+    transformEngine,
+    transformWarning,
+    requiresConfirmation,
+    confirmationPrompt,
+    report: run.report,
+    reportSource,
+    operations: Array.isArray(plan.operations) ? plan.operations : [],
+    stats: run.stats,
+    diff,
+    features: preview.allColumns,
+    preview: run.preview,
+    download: {
+      csvUrl: `/api/data/runs/${encodeURIComponent(run.id)}/export.csv`,
+      expiresAt: run.expiresAt,
+    },
+  });
+});
+
+app.get("/api/data/runs/:runId", authenticate, async (req, res, next) => {
+  try {
+    const run = await repository.getDataAiRun(req.params.runId);
+    if (!run) {
+      return res.status(404).json({
+        error: "run_not_found",
+        message: `run not found: ${req.params.runId}`,
+      });
+    }
+
+    if (!canAccessDataRun(run, req.authUser)) {
+      return res.status(403).json({
+        error: "forbidden",
+        message: "run access denied",
+      });
+    }
+
+    const includeRowsRaw = String(req.query?.includeRows || "")
+      .trim()
+      .toLowerCase();
+    const includeRows =
+      includeRowsRaw === "1" ||
+      includeRowsRaw === "true" ||
+      includeRowsRaw === "yes";
+
+    return res.json({
+      run: toDataRunResponse(run, { includeRows }),
+      download: {
+        csvUrl: `/api/data/runs/${encodeURIComponent(run.id)}/export.csv`,
+        expiresAt: run.expiresAt,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/data/runs/:runId/export.csv", authenticate, async (req, res, next) => {
+  try {
+    const run = await repository.getDataAiRun(req.params.runId);
+    if (!run) {
+      return res.status(404).json({
+        error: "run_not_found",
+        message: `run not found: ${req.params.runId}`,
+      });
+    }
+
+    if (!canAccessDataRun(run, req.authUser)) {
+      return res.status(403).json({
+        error: "forbidden",
+        message: "run access denied",
+      });
+    }
+
+    const cleanedRows = Array.isArray(run.cleanedRows) ? run.cleanedRows : [];
+    const csv = rowsToCsv(cleanedRows);
+    const sourcePart = String(run.sourceName || "")
+      .replace(/\\.[a-z0-9]+$/i, "")
+      .replace(/[^a-z0-9._-]+/gi, "_")
+      .replace(/^_+|_+$/g, "");
+    const filename = `${sourcePart || `run_${run.id.slice(0, 8)}`}_cleaned.csv`;
+
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader("content-disposition", `attachment; filename=\"${filename}\"`);
+    return res.send(`\\uFEFF${csv}`);
+  } catch (error) {
+    return next(error);
   }
 });
 

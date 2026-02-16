@@ -67,11 +67,28 @@ npm run start
 
 - `DATABASE_URL` (선택, 권장)
   - 설정 시 PostgreSQL 영속 저장
-  - 미설정 시 in-memory (재시작 시 데이터 유실)
+  - 미설정 시 in-memory
+- `AUTH_DISABLED` (기본 `true`)
+  - `true`면 로그인/JWT를 우회하고 단일 퍼블릭 세션으로 동작
+  - 빠른 공개 데모/초기 배포용, 운영 보안 모드에서는 `false`로 전환
+- `MEMORY_REPO_PERSIST` (기본 `true`, `DATABASE_URL` 미설정 시)
+  - 로컬 재시작 후에도 Provider Auth 연결 상태를 파일에 유지
+- `MEMORY_REPO_STATE_FILE` (기본 `.cache/memory-repository.json`)
+  - in-memory 모드 로컬 상태 파일 경로
 - `NODE_ENV`
 - `MAX_UPLOAD_SIZE_MB` (기본 20)
 - `JOB_POLL_INTERVAL_MS` (기본 750)
 - `JOB_BATCH_SIZE` (기본 5)
+- `DATA_AI_MAX_ROWS` (기본 5000)
+- `DATA_AI_MAX_COLUMNS` (기본 120)
+- `DATA_AI_CELL_MAX_LENGTH` (기본 2048)
+- `DATA_AI_SAMPLE_ROWS` (기본 40)
+- `DATA_AI_MODEL_TIMEOUT_MS` (기본 45000ms)
+- `DATA_AI_RUN_TTL_SEC` (기본 1800초)
+- `DATA_AI_PYTHON_TOOL_ENABLED` (기본 로컬 `true`, 서버리스 `false`)
+- `DATA_AI_PYTHON_BIN` (기본 `python3`)
+- `DATA_AI_PYTHON_TIMEOUT_MS` (기본 20000ms)
+- `DATA_AI_PYTHON_SCRIPT` (기본 `scripts/data_transformer.py`)
 - `MICROCACHE_TTL_MS` (선택)
 - `JWT_ACCESS_SECRET` (운영 필수)
 - `JWT_REFRESH_SECRET` (운영 필수)
@@ -91,6 +108,11 @@ npm run start
 - `SUPABASE_AVATAR_PUBLIC` (기본 `true`)
 - `SUPABASE_AVATAR_SIGNED_URL_EXPIRES_SEC` (기본 3600, private bucket용)
 - `SUPABASE_AVATAR_MAX_FILES` (기본 5000, 랜덤 카탈로그 스캔 상한)
+
+참고:
+
+- 데이터 처리 명령은 기본적으로 모델이 변경안을 제안하고, 사용자가 `apply`로 승인해야 현재 작업 데이터에 반영됩니다.
+- `DATA_AI_PYTHON_TOOL_ENABLED=true`인 로컬 환경에서는 변환 적용을 Python 툴로 실행하고, 실패 시 JS fallback을 사용합니다.
 
 ### 아바타 저장소 전환 (Supabase Storage)
 

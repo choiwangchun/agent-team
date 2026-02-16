@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/css/tailwind.css?v=<%= assetVersion %>" />
   </head>
   <body class="min-h-screen bg-gradient-to-br from-[#e8f7ff] via-[#f8fbff] to-[#fff3ed]">
-    <div id="appShell" class="mx-auto hidden max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <div id="appShell" class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <div class="grid gap-6 lg:grid-cols-[280px,1fr]">
         <aside
           class="flex flex-col rounded-3xl border border-white/70 bg-white/90 p-5 shadow-soft backdrop-blur lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:overflow-y-auto"
@@ -75,13 +75,6 @@
           <div class="mt-auto rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
             <p class="text-xs text-slate-500">Signed in as</p>
             <p id="signedInUser" class="font-semibold text-slate-900"><%= user.name %> (<%= user.role %>)</p>
-            <button
-              id="logoutBtn"
-              type="button"
-              class="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
-            >
-              로그아웃
-            </button>
           </div>
         </aside>
 
@@ -171,31 +164,6 @@
     </div>
   </article>
 
-  <article class="mt-5 rounded-2xl border border-slate-100 bg-slate-50 p-5">
-    <h3 class="font-semibold text-slate-900">명령창</h3>
-    <p class="mt-1 text-sm text-slate-500">
-      여기서 명령을 실행하면 codex나 claude code처럼 agent가 일하는 로그를 볼 수 있습니다.
-      기본으로 탑재된 데이터 엔지니어 agent가 데이터 분석, 데이터 전처리를 action 할 수 있게 구현할 예정입니다.
-    </p>
-    <pre
-      id="dpCommandLog"
-      class="mt-3 h-44 overflow-auto rounded-xl border border-slate-200 bg-[#0b1221] p-3 font-mono text-xs text-[#d9e5ff]"
-    >[system] help, status, list features, clear features</pre>
-    <form id="dpCommandForm" class="mt-3 flex flex-row flex-nowrap items-center gap-2">
-      <input
-        id="dpCommandInput"
-        type="text"
-        placeholder="예: list features"
-        class="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
-      />
-      <button
-        type="submit"
-        class="shrink-0 whitespace-nowrap rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 min-w-[84px]"
-      >
-        실행
-      </button>
-    </form>
-  </article>
 </section>
 
 
@@ -447,65 +415,13 @@
       </div>
     </div>
 
-    <div id="authGate" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/20 px-4 py-8 backdrop-blur">
-      <div class="w-full max-w-md rounded-3xl border border-white/70 bg-white p-6 shadow-soft">
-        <h1 class="font-display text-xl font-semibold text-slate-900">로그인</h1>
-        <p class="mt-1 text-sm text-slate-500">Agent Workspace를 사용하려면 로그인하세요.</p>
-
-        <div id="authNotice" class="mt-4 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
-          세션을 확인하는 중입니다.
-        </div>
-
-        <form id="loginForm" class="mt-4 space-y-3">
-          <label class="block text-sm">
-            <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Email</span>
-            <input
-              id="loginEmail"
-              type="email"
-              autocomplete="username"
-              value="admin@agent.local"
-              class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
-              required
-            />
-          </label>
-
-          <label class="block text-sm">
-            <span class="mb-1 block text-xs uppercase tracking-wide text-slate-500">Password</span>
-            <input
-              id="loginPassword"
-              type="password"
-              autocomplete="current-password"
-              class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-electric/30 transition focus:ring"
-              required
-            />
-          </label>
-
-          <button
-            id="loginSubmitBtn"
-            type="submit"
-            class="w-full rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800"
-          >
-            로그인
-          </button>
-        </form>
-      </div>
-    </div>
-
     <script>
       (() => {
         const buttons = Array.from(document.querySelectorAll('.tab-btn'));
         const panels = Array.from(document.querySelectorAll('.tab-panel'));
         const inactiveClasses = ['text-slate-700', 'hover:bg-slate-100', 'hover:text-slate-900'];
-        const appShell = document.getElementById('appShell');
         const auth = {
-          gate: document.getElementById('authGate'),
-          notice: document.getElementById('authNotice'),
-          form: document.getElementById('loginForm'),
-          email: document.getElementById('loginEmail'),
-          password: document.getElementById('loginPassword'),
-          submitBtn: document.getElementById('loginSubmitBtn'),
           signedInUser: document.getElementById('signedInUser'),
-          logoutBtn: document.getElementById('logoutBtn'),
         };
 
         function setTab(nextTab, pushHash = true) {
@@ -566,15 +482,9 @@
           });
         }
 
-        function handleAuthRequired(message = '로그인이 필요합니다.') {
-          state.auth.user = null;
-          updateSignedInUser(null);
-          showAuthGate(message, 'info');
-        }
-
         async function requestJson(url, options = {}) {
           const {
-            suppressAuthRedirect = false,
+            suppressAuthRedirect: _suppressAuthRedirect = false,
             ...fetchOptions
           } = options || {};
           const response = await fetch(url, {
@@ -594,9 +504,6 @@
             const error = new Error(message);
             error.status = response.status;
             error.payload = data;
-            if (response.status === 401 && !suppressAuthRedirect) {
-              handleAuthRequired(message);
-            }
             throw error;
           }
 
@@ -625,19 +532,6 @@
           el.classList.add('hidden');
         }
 
-        function setAuthNotice(message, type = 'info') {
-          if (!auth.notice) {
-            return;
-          }
-          const styles = {
-            info: 'border-sky-200 bg-sky-50 text-sky-800',
-            success: 'border-emerald-200 bg-emerald-50 text-emerald-800',
-            error: 'border-rose-200 bg-rose-50 text-rose-800',
-          };
-          auth.notice.className = `mt-4 rounded-xl border px-3 py-2 text-sm ${styles[type] || styles.info}`;
-          auth.notice.textContent = message;
-        }
-
         function updateSignedInUser(user) {
           if (!auth.signedInUser) {
             return;
@@ -649,83 +543,6 @@
           const name = String(user.name || user.email || 'User');
           const role = String(user.role || 'viewer');
           auth.signedInUser.textContent = `${name} (${role})`;
-        }
-
-        function setAuthFormBusy(isBusy) {
-          state.auth.loginBusy = Boolean(isBusy);
-          const now = Date.now();
-          const lockRemainingSec = Math.max(0, Math.ceil((state.auth.lockUntilMs - now) / 1000));
-          const isLocked = lockRemainingSec > 0;
-
-          if (auth.submitBtn) {
-            auth.submitBtn.disabled = Boolean(isBusy) || isLocked;
-            auth.submitBtn.classList.toggle('opacity-60', Boolean(isBusy) || isLocked);
-            auth.submitBtn.textContent = isBusy
-              ? '로그인 중...'
-              : isLocked
-                ? `잠금 ${lockRemainingSec}s`
-                : '로그인';
-          }
-          if (auth.email) {
-            auth.email.disabled = isBusy;
-          }
-          if (auth.password) {
-            auth.password.disabled = isBusy;
-          }
-        }
-
-        function showAppShell() {
-          appShell?.classList.remove('hidden');
-          auth.gate?.classList.add('hidden');
-        }
-
-        function showAuthGate(message = '로그인이 필요합니다.', type = 'info') {
-          setAuthNotice(message, type);
-          auth.gate?.classList.remove('hidden');
-          appShell?.classList.add('hidden');
-          stopPolling();
-          setAuthFormBusy(state.auth.loginBusy);
-        }
-
-        function stopLoginLockTimer() {
-          if (!state.auth.lockTimer) {
-            return;
-          }
-          clearInterval(state.auth.lockTimer);
-          state.auth.lockTimer = null;
-        }
-
-        function clearLoginLockState() {
-          state.auth.lockUntilMs = 0;
-          stopLoginLockTimer();
-          setAuthFormBusy(state.auth.loginBusy);
-        }
-
-        function startLoginLockState(retryAfterSec, maxAttempts) {
-          const safeRetryAfterSec = Math.max(1, Number(retryAfterSec) || 1);
-          state.auth.lockUntilMs = Date.now() + safeRetryAfterSec * 1000;
-          stopLoginLockTimer();
-          setAuthFormBusy(state.auth.loginBusy);
-
-          const updateLockMessage = () => {
-            const remainingSec = Math.max(
-              0,
-              Math.ceil((state.auth.lockUntilMs - Date.now()) / 1000)
-            );
-            if (remainingSec <= 0) {
-              clearLoginLockState();
-              setAuthNotice('로그인을 다시 시도할 수 있습니다.', 'info');
-              return;
-            }
-            const attemptsText = Number.isFinite(Number(maxAttempts))
-              ? `최대 ${Number(maxAttempts)}회 초과`
-              : '로그인 시도 초과';
-            setAuthNotice(`${attemptsText}로 ${remainingSec}초 동안 잠금 상태입니다.`, 'error');
-            setAuthFormBusy(state.auth.loginBusy);
-          };
-
-          updateLockMessage();
-          state.auth.lockTimer = setInterval(updateLockMessage, 1000);
         }
 
         function parseCsvLine(value) {
@@ -746,9 +563,6 @@
         const state = {
           auth: {
             user: null,
-            loginBusy: false,
-            lockUntilMs: 0,
-            lockTimer: null,
           },
           ui: {
             avatarLoading: false,
@@ -775,7 +589,12 @@
           dataProcessing: {
             features: [],
             lastFileName: '',
-            logs: ['[system] help, status, list features, clear features'],
+            rawRows: [],
+            modelTouched: false,
+            processingBusy: false,
+            latestRun: null,
+            pendingProposal: null,
+            logs: ['[agent] 파일 업로드 후 질문하거나 수정 요청을 입력하세요.'],
             preview: {
               fileName: '',
               columns: [],
@@ -811,9 +630,25 @@
           resetUploadBtn: document.getElementById('dpResetUploadBtn'),
           featureList: document.getElementById('dpFeatureList'),
           featureEmpty: document.getElementById('dpFeatureEmpty'),
+          modelSelect: document.getElementById('dpModelSelect'),
           commandLog: document.getElementById('dpCommandLog'),
           commandForm: document.getElementById('dpCommandForm'),
           commandInput: document.getElementById('dpCommandInput'),
+          commandSubmitBtn: document.getElementById('dpCommandSubmitBtn'),
+          resultWrap: document.getElementById('dpResultWrap'),
+          resultSummary: document.getElementById('dpResultSummary'),
+          resultReport: document.getElementById('dpResultReport'),
+          resultProposalWrap: document.getElementById('dpResultProposalWrap'),
+          resultProposalText: document.getElementById('dpResultProposalText'),
+          resultApplyBtn: document.getElementById('dpResultApplyBtn'),
+          resultDiscardBtn: document.getElementById('dpResultDiscardBtn'),
+          resultDiffBody: document.getElementById('dpResultDiffBody'),
+          resultDiffEmpty: document.getElementById('dpResultDiffEmpty'),
+          resultStats: document.getElementById('dpResultStats'),
+          resultPreviewHead: document.getElementById('dpResultPreviewHead'),
+          resultPreviewBody: document.getElementById('dpResultPreviewBody'),
+          resultPreviewEmpty: document.getElementById('dpResultPreviewEmpty'),
+          resultDownloadLink: document.getElementById('dpResultDownloadLink'),
         };
 
         const ac = {
@@ -1050,11 +885,7 @@
           };
         }
 
-        function renderAgentModelCatalog() {
-          if (!ac.modelSelect) {
-            return;
-          }
-
+        function getAvailableModelCatalog() {
           const fallbackModel = [
             {
               value: 'Balanced (default)',
@@ -1062,11 +893,19 @@
               provider: 'system',
             },
           ];
-          const models = Array.isArray(state.providerAuth.models) && state.providerAuth.models.length > 0
+          return Array.isArray(state.providerAuth.models) && state.providerAuth.models.length > 0
             ? state.providerAuth.models
             : fallbackModel;
-          const previousValue = String(ac.modelSelect.value || '').trim();
-          ac.modelSelect.innerHTML = models
+        }
+
+        function renderModelCatalogForSelect(selectEl) {
+          if (!selectEl) {
+            return;
+          }
+
+          const models = getAvailableModelCatalog();
+          const previousValue = String(selectEl.value || '').trim();
+          selectEl.innerHTML = models
             .map((item) => {
               const value = String(item.value || '').trim();
               const label = String(item.label || value || '').trim() || value;
@@ -1078,11 +917,45 @@
 
           const hasPreviousValue = models.some((item) => String(item.value || '').trim() === previousValue);
           if (hasPreviousValue) {
-            ac.modelSelect.value = previousValue;
+            selectEl.value = previousValue;
             return;
           }
           if (models.length > 0) {
-            ac.modelSelect.value = String(models[0].value || 'Balanced (default)');
+            selectEl.value = String(models[0].value || 'Balanced (default)');
+          }
+        }
+
+        function renderAgentModelCatalog() {
+          renderModelCatalogForSelect(ac.modelSelect);
+        }
+
+        function getPreferredDataProcessingModelValue() {
+          const models = getAvailableModelCatalog();
+          const openaiModel = models.find((item) => {
+            const provider = String(item?.provider || '').trim().toLowerCase();
+            return provider === 'openai-codex' || provider === 'openai';
+          });
+          if (openaiModel?.value) {
+            return String(openaiModel.value).trim();
+          }
+          const providerModel = models.find((item) => String(item?.provider || '').trim().toLowerCase() !== 'system');
+          if (providerModel?.value) {
+            return String(providerModel.value).trim();
+          }
+          return '';
+        }
+
+        function renderDataProcessingModelCatalog() {
+          renderModelCatalogForSelect(dp.modelSelect);
+          if (!dp.modelSelect) {
+            return;
+          }
+          const current = String(dp.modelSelect.value || '').trim();
+          if (!state.dataProcessing.modelTouched && (!current || current === 'Balanced (default)')) {
+            const preferredValue = getPreferredDataProcessingModelValue();
+            if (preferredValue) {
+              dp.modelSelect.value = preferredValue;
+            }
           }
         }
 
@@ -1352,6 +1225,7 @@
             const response = await requestJson('/api/models');
             state.providerAuth.models = Array.isArray(response.models) ? response.models : [];
             renderAgentModelCatalog();
+            renderDataProcessingModelCatalog();
           } catch (error) {
             state.providerAuth.models = [
               {
@@ -1363,6 +1237,7 @@
               },
             ];
             renderAgentModelCatalog();
+            renderDataProcessingModelCatalog();
             setNotice(ac.notice, `모델 목록 조회 실패: ${error.message}`, 'error');
           } finally {
             refreshingModelCatalog = false;
@@ -1743,6 +1618,232 @@
           };
         }
 
+        function clearDataRunResult() {
+          state.dataProcessing.latestRun = null;
+          state.dataProcessing.pendingProposal = null;
+          if (
+            !dp.resultWrap ||
+            !dp.resultSummary ||
+            !dp.resultReport ||
+            !dp.resultProposalWrap ||
+            !dp.resultProposalText ||
+            !dp.resultDiffBody ||
+            !dp.resultDiffEmpty ||
+            !dp.resultStats ||
+            !dp.resultPreviewHead ||
+            !dp.resultPreviewBody ||
+            !dp.resultPreviewEmpty ||
+            !dp.resultDownloadLink
+          ) {
+            return;
+          }
+
+          dp.resultWrap.classList.add('hidden');
+          dp.resultSummary.textContent = '아직 실행 결과가 없습니다.';
+          dp.resultReport.textContent = '';
+          dp.resultProposalWrap.classList.add('hidden');
+          dp.resultProposalText.textContent = '';
+          dp.resultDiffBody.innerHTML = '';
+          dp.resultDiffEmpty.textContent = '변경 diff가 없습니다.';
+          dp.resultDiffEmpty.classList.remove('hidden');
+          dp.resultStats.textContent = '';
+          dp.resultPreviewHead.innerHTML = '';
+          dp.resultPreviewBody.innerHTML = '';
+          dp.resultPreviewEmpty.classList.remove('hidden');
+          dp.resultDownloadLink.href = '#';
+          dp.resultDownloadLink.classList.add('pointer-events-none', 'opacity-60');
+          dp.resultDownloadLink.removeAttribute('download');
+        }
+
+        function renderDataRunResult(result) {
+          if (
+            !dp.resultWrap ||
+            !dp.resultSummary ||
+            !dp.resultReport ||
+            !dp.resultProposalWrap ||
+            !dp.resultProposalText ||
+            !dp.resultDiffBody ||
+            !dp.resultDiffEmpty ||
+            !dp.resultStats ||
+            !dp.resultPreviewHead ||
+            !dp.resultPreviewBody ||
+            !dp.resultPreviewEmpty ||
+            !dp.resultDownloadLink
+          ) {
+            return;
+          }
+          if (!result || typeof result !== 'object') {
+            clearDataRunResult();
+            return;
+          }
+
+          const runId = String(result.runId || '').trim();
+          const action = String(result.action || 'analyze').trim() || 'analyze';
+          const report = String(result.report || '').trim();
+          const stats = result.stats && typeof result.stats === 'object' ? result.stats : {};
+          const diff = result.diff && typeof result.diff === 'object' ? result.diff : {};
+          const preview = result.preview && typeof result.preview === 'object' ? result.preview : {};
+          const columns = Array.isArray(preview.columns) ? preview.columns : [];
+          const rows = Array.isArray(preview.rows) ? preview.rows : [];
+          const totalRows = Math.max(0, Number(preview.totalRows) || rows.length);
+          const totalColumns = Math.max(columns.length, Number(preview.totalColumns) || columns.length);
+          const downloadUrl = String(result.download?.csvUrl || '').trim();
+          const expiresAt = String(result.download?.expiresAt || '').trim();
+          const expiresText = expiresAt ? new Date(expiresAt).toLocaleString('ko-KR') : '-';
+          const requiresConfirmation = Boolean(result.requiresConfirmation);
+          const confirmationPrompt = String(result.confirmationPrompt || '').trim();
+          const diffChangedCells = Array.isArray(diff.changedCells) ? diff.changedCells : [];
+          const diffChangedRows = Number(diff.changedRowCount) || 0;
+          const diffChangedCellCount = Number(diff.changedCellCount) || 0;
+
+          state.dataProcessing.latestRun = {
+            runId,
+            action,
+            report,
+            stats,
+            diff,
+            preview: {
+              columns,
+              rows,
+              totalRows,
+              totalColumns,
+            },
+            downloadUrl,
+            expiresAt,
+            requiresConfirmation,
+            confirmationPrompt,
+          };
+
+          if (requiresConfirmation && runId) {
+            state.dataProcessing.pendingProposal = {
+              runId,
+              action,
+              message:
+                confirmationPrompt ||
+                '모델이 데이터 변경을 제안했습니다. diff를 확인한 뒤 적용 여부를 선택하세요.',
+              stats,
+            };
+          } else {
+            state.dataProcessing.pendingProposal = null;
+          }
+
+          const inputRows = Number(stats.inputRows) || 0;
+          const outputRows = Number(stats.outputRows) || 0;
+          const modifiedCells = Number(stats.modifiedCells) || 0;
+          const droppedRows = Number(stats.droppedRows) || 0;
+          const operationsApplied = Number(stats.operationsApplied) || 0;
+          dp.resultSummary.textContent = `${action} 완료 · ${inputRows}행 -> ${outputRows}행 · 변경 셀 ${modifiedCells}개 · 제거 행 ${droppedRows}개 · 적용 규칙 ${operationsApplied}개 · 변경 행 ${diffChangedRows}개`;
+          dp.resultReport.textContent = report || '모델 인사이트가 비어 있습니다.';
+          dp.resultStats.textContent = JSON.stringify(
+            {
+              ...stats,
+              diff: {
+                changedRows: diffChangedRows,
+                changedCells: diffChangedCellCount,
+                droppedRowsEstimate: Number(diff.droppedRowsEstimate) || 0,
+                addedRowsEstimate: Number(diff.addedRowsEstimate) || 0,
+                diffPreviewCount: diffChangedCells.length,
+                diffPreviewTruncated: Boolean(diff.truncated),
+              },
+            },
+            null,
+            2
+          );
+
+          if (requiresConfirmation) {
+            dp.resultProposalText.textContent =
+              confirmationPrompt ||
+              '모델이 데이터 변경을 제안했습니다. 아래 버튼으로 반영 여부를 결정하세요.';
+            dp.resultProposalWrap.classList.remove('hidden');
+          } else {
+            dp.resultProposalWrap.classList.add('hidden');
+            dp.resultProposalText.textContent = '';
+          }
+
+          dp.resultDiffBody.innerHTML = diffChangedCells
+            .map((item) => {
+              const rowIndex = Math.max(0, Number(item?.rowIndex) || 0) + 1;
+              const column = String(item?.column || '').trim() || '-';
+              const before = String(item?.before ?? '');
+              const after = String(item?.after ?? '');
+              return `
+                <tr class="border-t border-slate-100 align-top">
+                  <td class="whitespace-nowrap px-3 py-2 text-slate-500">${rowIndex}</td>
+                  <td class="whitespace-nowrap px-3 py-2 font-semibold text-slate-700">${escapeHtml(column)}</td>
+                  <td class="px-3 py-2 text-slate-600">${escapeHtml(truncateForDisplay(before, 90))}</td>
+                  <td class="px-3 py-2 text-slate-900">${escapeHtml(truncateForDisplay(after, 90))}</td>
+                </tr>
+              `;
+            })
+            .join('');
+          if (diffChangedCells.length > 0) {
+            dp.resultDiffEmpty.classList.add('hidden');
+          } else {
+            dp.resultDiffEmpty.textContent = requiresConfirmation
+              ? '변경 제안은 있으나 표시 가능한 diff 샘플이 없습니다.'
+              : '변경 diff가 없습니다.';
+            dp.resultDiffEmpty.classList.remove('hidden');
+          }
+
+          dp.resultPreviewHead.innerHTML = `
+            <tr>
+              <th class="w-12 whitespace-nowrap px-3 py-2 font-semibold text-slate-500">#</th>
+              ${columns
+                .map(
+                  (column) =>
+                    `<th class="whitespace-nowrap px-3 py-2 font-semibold text-slate-600">${escapeHtml(column)}</th>`
+                )
+                .join('')}
+            </tr>
+          `;
+
+          dp.resultPreviewBody.innerHTML = rows
+            .map((row, rowIndex) => {
+              const cells = Array.isArray(row) ? row : [];
+              return `
+                <tr class="border-t border-slate-100 align-top">
+                  <td class="whitespace-nowrap px-3 py-2 text-slate-400">${rowIndex + 1}</td>
+                  ${columns
+                    .map((_, columnIndex) => {
+                      const raw = cells[columnIndex] ?? '';
+                      const text = String(raw);
+                      return `<td class="px-3 py-2 text-slate-700" title="${escapeHtml(text)}">${escapeHtml(
+                        truncateForDisplay(text, 80)
+                      )}</td>`;
+                    })
+                    .join('')}
+                </tr>
+              `;
+            })
+            .join('');
+
+          dp.resultPreviewEmpty.classList.toggle('hidden', rows.length > 0);
+          if (downloadUrl) {
+            const runPart = runId ? `run-${runId.slice(0, 8)}` : 'run';
+            dp.resultDownloadLink.href = downloadUrl;
+            dp.resultDownloadLink.setAttribute('download', `${runPart}-cleaned.csv`);
+            dp.resultDownloadLink.classList.remove('pointer-events-none', 'opacity-60');
+          } else {
+            dp.resultDownloadLink.href = '#';
+            dp.resultDownloadLink.classList.add('pointer-events-none', 'opacity-60');
+            dp.resultDownloadLink.removeAttribute('download');
+          }
+          dp.resultDownloadLink.title = `만료시각: ${expiresText}`;
+          dp.resultWrap.classList.remove('hidden');
+        }
+
+        function setDataCommandBusy(isBusy) {
+          state.dataProcessing.processingBusy = Boolean(isBusy);
+          if (dp.commandInput) {
+            dp.commandInput.disabled = Boolean(isBusy);
+          }
+          if (dp.commandSubmitBtn) {
+            dp.commandSubmitBtn.disabled = Boolean(isBusy);
+            dp.commandSubmitBtn.classList.toggle('opacity-60', Boolean(isBusy));
+            dp.commandSubmitBtn.textContent = isBusy ? '실행 중...' : '실행';
+          }
+        }
+
         function renderDataPreview() {
           if (!dp.uploadWrap || !dp.previewWrap || !dp.previewMeta || !dp.previewHead || !dp.previewBody || !dp.previewEmpty) {
             return;
@@ -1807,13 +1908,107 @@
         function resetDataUploadState() {
           state.dataProcessing.lastFileName = '';
           state.dataProcessing.features = [];
+          state.dataProcessing.rawRows = [];
           resetDataPreview();
+          clearDataRunResult();
           renderDataFeatures();
           renderDataPreview();
           syncStudioFeaturesFromData();
           if (dp.fileMeta) {
             dp.fileMeta.textContent = '아직 선택된 파일이 없습니다.';
           }
+        }
+
+        function collectColumnsFromRows(rows) {
+          const set = new Set();
+          for (const row of Array.isArray(rows) ? rows : []) {
+            if (!row || typeof row !== 'object' || Array.isArray(row)) {
+              continue;
+            }
+            for (const key of Object.keys(row)) {
+              const normalized = String(key || '').trim();
+              if (normalized) {
+                set.add(normalized);
+              }
+            }
+          }
+          return Array.from(set);
+        }
+
+        function applyRowsToWorkspace(rows, sourceName = '') {
+          const safeRows = Array.isArray(rows)
+            ? rows.filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+            : [];
+          const preview = buildJsonPreview(safeRows, {
+            maxRows: 20,
+            maxColumns: 16,
+            maxRawRows: 5000,
+          });
+          const allColumns = collectColumnsFromRows(safeRows);
+          const safeSourceName = String(sourceName || state.dataProcessing.lastFileName || '').trim();
+          if (safeSourceName) {
+            state.dataProcessing.lastFileName = safeSourceName;
+          }
+          state.dataProcessing.rawRows = safeRows;
+          state.dataProcessing.features = allColumns;
+          state.dataProcessing.preview = {
+            fileName: safeSourceName,
+            columns: preview.previewColumns,
+            rows: preview.previewRows,
+            totalRows: preview.totalRows,
+            totalColumns: allColumns.length,
+          };
+          renderDataFeatures();
+          renderDataPreview();
+          syncStudioFeaturesFromData();
+        }
+
+        async function applyPendingDataProposal() {
+          const pending = state.dataProcessing.pendingProposal;
+          if (!pending?.runId) {
+            pushDataChatMessage('agent', '적용할 변경 제안이 없습니다.');
+            return;
+          }
+
+          const runId = String(pending.runId || '').trim();
+          try {
+            const response = await requestJson(`/api/data/runs/${encodeURIComponent(runId)}?includeRows=1`);
+            const run = response?.run && typeof response.run === 'object' ? response.run : null;
+            const rows = Array.isArray(run?.cleanedRows) ? run.cleanedRows : [];
+            if (rows.length === 0) {
+              throw new Error('적용 가능한 결과 데이터가 없습니다.');
+            }
+
+            applyRowsToWorkspace(rows, run?.sourceName || state.dataProcessing.lastFileName || '');
+            state.dataProcessing.pendingProposal = null;
+            if (state.dataProcessing.latestRun) {
+              state.dataProcessing.latestRun.requiresConfirmation = false;
+            }
+            if (dp.resultProposalWrap && dp.resultProposalText) {
+              dp.resultProposalWrap.classList.add('hidden');
+              dp.resultProposalText.textContent = '';
+            }
+
+            pushDataChatMessage('agent', '변경 제안을 적용해 현재 데이터에 반영했습니다.');
+            setNotice(dp.notice, '제안된 변경을 현재 작업 데이터에 저장했습니다.', 'success');
+          } catch (error) {
+            pushDataChatMessage('agent', `변경 적용 실패: ${error.message}`);
+            setNotice(dp.notice, `변경 적용 실패: ${error.message}`, 'error');
+          }
+        }
+
+        function discardPendingDataProposal() {
+          state.dataProcessing.pendingProposal = null;
+          if (state.dataProcessing.latestRun) {
+            state.dataProcessing.latestRun.requiresConfirmation = false;
+          }
+          if (dp.resultProposalWrap && dp.resultProposalText) {
+            dp.resultProposalWrap.classList.add('hidden');
+            dp.resultProposalText.textContent = '';
+          }
+
+          pushDataChatMessage('agent', '변경 제안을 취소했습니다. 원본 데이터는 유지됩니다.');
+          setNotice(dp.notice, '변경 제안을 취소했습니다. 원본 데이터는 유지됩니다.', 'info');
         }
 
         function getFeaturePool() {
@@ -1887,6 +2082,87 @@
           }
         }
 
+        function pushDataChatMessage(role, message) {
+          const roleLabel = String(role || '').trim() || 'agent';
+          const text = String(message || '').trim();
+          if (!text) {
+            return;
+          }
+          const lines = text
+            .split(/\r?\n+/)
+            .map((line) => String(line || '').trim())
+            .filter(Boolean);
+          if (lines.length === 0) {
+            return;
+          }
+          lines.forEach((line) => {
+            pushDataLog(`${roleLabel}: ${line}`);
+          });
+        }
+
+        function formatDataOperationForLog(operation) {
+          if (!operation || typeof operation !== 'object') {
+            return 'unknown operation';
+          }
+
+          const type = String(operation.type || '').trim();
+          if (!type) {
+            return 'unknown operation';
+          }
+
+          if (type === 'rename_column') {
+            const from = String(operation.from || '').trim() || '-';
+            const to = String(operation.to || '').trim() || '-';
+            return `rename_column: ${from} -> ${to}`;
+          }
+
+          if (type === 'trim_whitespace') {
+            return `trim_whitespace: ${String(operation.column || '').trim() || '-'}`;
+          }
+
+          if (type === 'normalize_empty_to_null') {
+            return `normalize_empty_to_null: ${String(operation.column || '').trim() || '-'}`;
+          }
+
+          if (type === 'value_map') {
+            const column = String(operation.column || '').trim() || '-';
+            const mappings = operation.mappings && typeof operation.mappings === 'object'
+              ? Object.entries(operation.mappings)
+              : [];
+            const preview = mappings
+              .slice(0, 3)
+              .map(([from, to]) => `${String(from)}=>${String(to)}`)
+              .join(', ');
+            const extra = mappings.length > 3 ? ` ... +${mappings.length - 3}` : '';
+            return `value_map: ${column}${preview ? ` (${truncateForDisplay(preview, 120)}${extra})` : ''}`;
+          }
+
+          if (type === 'parse_number') {
+            return `parse_number: ${String(operation.column || '').trim() || '-'}`;
+          }
+
+          if (type === 'normalize_date') {
+            const column = String(operation.column || '').trim() || '-';
+            const outputFormat = String(operation.outputFormat || '').trim() || 'YYYY-MM-DD';
+            return `normalize_date: ${column} -> ${outputFormat}`;
+          }
+
+          if (type === 'drop_columns') {
+            const columns = Array.isArray(operation.columns)
+              ? operation.columns.map((item) => String(item || '').trim()).filter(Boolean)
+              : [];
+            const preview = columns.slice(0, 4).join(', ');
+            const extra = columns.length > 4 ? ` ... +${columns.length - 4}` : '';
+            return `drop_columns: ${preview || '-'}${extra}`;
+          }
+
+          try {
+            return `${type}: ${truncateForDisplay(JSON.stringify(operation), 140)}`;
+          } catch {
+            return type;
+          }
+        }
+
         function normalizeColumnName(value, index) {
           const clean = String(value || '').trim().replace(/^['"]|['"]$/g, '');
           return clean || `column_${index + 1}`;
@@ -1940,6 +2216,7 @@
         function buildDelimitedPreview(text, delimiter, options = {}) {
           const maxRows = Math.max(1, Number(options.maxRows) || 20);
           const maxColumns = Math.max(1, Number(options.maxColumns) || 16);
+          const maxRawRows = Math.max(maxRows, Number(options.maxRawRows) || 5000);
           const lines = String(text || '')
             .split(/\r?\n/)
             .filter((line) => String(line).trim().length > 0);
@@ -1950,6 +2227,8 @@
               previewColumns: [],
               previewRows: [],
               totalRows: 0,
+              rawRows: [],
+              truncatedRows: false,
             };
           }
 
@@ -1957,11 +2236,25 @@
           const allColumns = rawHeaders.map((name, index) => normalizeColumnName(name, index));
           const previewColumns = allColumns.slice(0, maxColumns);
           const previewRows = [];
+          const rawRows = [];
+          const totalRows = Math.max(0, lines.length - 1);
+          const maxParsedRows = Math.min(totalRows, maxRawRows);
+          const truncatedRows = totalRows > maxRawRows;
 
-          for (let lineIndex = 1; lineIndex < lines.length && previewRows.length < maxRows; lineIndex += 1) {
+          for (let lineIndex = 1; lineIndex < lines.length && rawRows.length < maxParsedRows; lineIndex += 1) {
             const cells = parseDelimitedLine(lines[lineIndex], delimiter);
+            const rowObject = {};
+            for (let columnIndex = 0; columnIndex < allColumns.length; columnIndex += 1) {
+              const column = allColumns[columnIndex];
+              rowObject[column] = toPreviewCellText(cells[columnIndex] ?? '');
+            }
+            rawRows.push(rowObject);
+          }
+
+          for (let rowIndex = 0; rowIndex < rawRows.length && previewRows.length < maxRows; rowIndex += 1) {
+            const rowObject = rawRows[rowIndex];
             previewRows.push(
-              previewColumns.map((_, columnIndex) => toPreviewCellText(cells[columnIndex]))
+              previewColumns.map((column) => toPreviewCellText(rowObject[column]))
             );
           }
 
@@ -1969,27 +2262,35 @@
             allColumns,
             previewColumns,
             previewRows,
-            totalRows: Math.max(0, lines.length - 1),
+            totalRows,
+            rawRows,
+            truncatedRows,
           };
         }
 
         function buildJsonPreview(value, options = {}) {
           const maxRows = Math.max(1, Number(options.maxRows) || 20);
           const maxColumns = Math.max(1, Number(options.maxColumns) || 16);
+          const maxRawRows = Math.max(maxRows, Number(options.maxRawRows) || 5000);
 
           if (Array.isArray(value)) {
             const objectRows = value.filter((row) => row && typeof row === 'object' && !Array.isArray(row));
             if (objectRows.length === 0) {
+              const rawRows = value
+                .slice(0, maxRawRows)
+                .map((item) => ({ value: toPreviewCellText(item) }));
               return {
                 allColumns: ['value'],
                 previewColumns: ['value'],
-                previewRows: value.slice(0, maxRows).map((item) => [toPreviewCellText(item)]),
+                previewRows: rawRows.slice(0, maxRows).map((item) => [toPreviewCellText(item.value)]),
                 totalRows: value.length,
+                rawRows,
+                truncatedRows: value.length > maxRawRows,
               };
             }
 
             const keySet = new Set();
-            for (const row of objectRows.slice(0, 400)) {
+            for (const row of objectRows.slice(0, 600)) {
               for (const key of Object.keys(row)) {
                 const normalized = String(key || '').trim();
                 if (normalized) {
@@ -2000,7 +2301,14 @@
 
             const allColumns = Array.from(keySet);
             const previewColumns = allColumns.slice(0, maxColumns);
-            const previewRows = objectRows.slice(0, maxRows).map((row) =>
+            const rawRows = objectRows.slice(0, maxRawRows).map((row) => {
+              const next = {};
+              for (const column of allColumns) {
+                next[column] = toPreviewCellText(row[column]);
+              }
+              return next;
+            });
+            const previewRows = rawRows.slice(0, maxRows).map((row) =>
               previewColumns.map((column) => toPreviewCellText(row[column]))
             );
 
@@ -2009,17 +2317,25 @@
               previewColumns,
               previewRows,
               totalRows: objectRows.length,
+              rawRows,
+              truncatedRows: objectRows.length > maxRawRows,
             };
           }
 
           if (value && typeof value === 'object') {
             const allColumns = Object.keys(value).map((column, index) => normalizeColumnName(column, index));
             const previewColumns = allColumns.slice(0, maxColumns);
+            const rowObject = {};
+            for (const column of allColumns) {
+              rowObject[column] = toPreviewCellText(value[column]);
+            }
             return {
               allColumns,
               previewColumns,
-              previewRows: [previewColumns.map((column) => toPreviewCellText(value[column]))],
+              previewRows: [previewColumns.map((column) => toPreviewCellText(rowObject[column]))],
               totalRows: 1,
+              rawRows: [rowObject],
+              truncatedRows: false,
             };
           }
 
@@ -2028,6 +2344,8 @@
             previewColumns: ['value'],
             previewRows: [[toPreviewCellText(value)]],
             totalRows: value === null || value === undefined ? 0 : 1,
+            rawRows: value === null || value === undefined ? [] : [{ value: toPreviewCellText(value) }],
+            truncatedRows: false,
           };
         }
 
@@ -2048,43 +2366,50 @@
           let previewColumns = [];
           let previewRows = [];
           let totalRows = 0;
+          let rawRows = [];
+          let truncatedRows = false;
 
           try {
             if (lowerName.endsWith('.csv')) {
               const text = await file.text();
-              const preview = buildDelimitedPreview(text, ',', { maxRows: 20, maxColumns: 16 });
+              const preview = buildDelimitedPreview(text, ',', { maxRows: 20, maxColumns: 16, maxRawRows: 5000 });
               features = preview.allColumns;
               previewColumns = preview.previewColumns;
               previewRows = preview.previewRows;
               totalRows = preview.totalRows;
+              rawRows = preview.rawRows;
+              truncatedRows = Boolean(preview.truncatedRows);
             } else if (lowerName.endsWith('.tsv') || lowerName.endsWith('.txt')) {
               const text = await file.text();
-              const preview = buildDelimitedPreview(text, '\t', { maxRows: 20, maxColumns: 16 });
+              const preview = buildDelimitedPreview(text, '\t', { maxRows: 20, maxColumns: 16, maxRawRows: 5000 });
               features = preview.allColumns;
               previewColumns = preview.previewColumns;
               previewRows = preview.previewRows;
               totalRows = preview.totalRows;
+              rawRows = preview.rawRows;
+              truncatedRows = Boolean(preview.truncatedRows);
             } else if (lowerName.endsWith('.json')) {
               const text = await file.text();
               const parsed = JSON.parse(text);
-              const preview = buildJsonPreview(parsed, { maxRows: 20, maxColumns: 16 });
+              const preview = buildJsonPreview(parsed, { maxRows: 20, maxColumns: 16, maxRawRows: 5000 });
               features = preview.allColumns;
               previewColumns = preview.previewColumns;
               previewRows = preview.previewRows;
               totalRows = preview.totalRows;
+              rawRows = preview.rawRows;
+              truncatedRows = Boolean(preview.truncatedRows);
             } else {
               setNotice(dp.notice, '해당 형식은 지금은 feature 미리보기 미지원입니다. (csv/json 우선 지원)', 'info');
-              pushDataLog(`분석 대기 형식: ${fileName}`);
               return;
             }
           } catch (error) {
             setNotice(dp.notice, `파일 분석 실패: ${error.message}`, 'error');
-            pushDataLog(`분석 실패: ${fileName}`);
             return;
           }
 
           const uniqueFeatures = [...new Set(features.map((item) => String(item).trim()).filter(Boolean))];
           state.dataProcessing.features = uniqueFeatures;
+          state.dataProcessing.rawRows = Array.isArray(rawRows) ? rawRows : [];
           state.dataProcessing.preview = {
             fileName,
             columns: previewColumns,
@@ -2092,11 +2417,15 @@
             totalRows,
             totalColumns: uniqueFeatures.length,
           };
+          clearDataRunResult();
           renderDataFeatures();
           renderDataPreview();
           syncStudioFeaturesFromData();
+          if (truncatedRows) {
+            setNotice(dp.notice, `feature ${uniqueFeatures.length}개 추출 (행 5000개까지만 로드)`, 'info');
+            return;
+          }
           setNotice(dp.notice, `feature ${uniqueFeatures.length}개 추출`, 'success');
-          pushDataLog(`feature 추출 완료: ${fileName} (${uniqueFeatures.length})`);
         }
 
         async function handleDataFileSelection(fileList) {
@@ -2107,52 +2436,159 @@
           await analyzeDroppedDataFile(file);
         }
 
-        function executeDataCommand(commandRaw) {
+        async function executeDataCommand(commandRaw) {
           const command = String(commandRaw || '').trim();
           if (!command) {
             return;
           }
-          pushDataLog(`$ ${command}`);
+          pushDataChatMessage('사용자', command);
 
           const normalized = command.toLowerCase();
           if (normalized === 'help') {
-            pushDataLog('명령어: help | status | list features | clear features');
+            pushDataChatMessage(
+              'agent',
+              '사용 가능한 명령어: help, status, list features, clear features, apply, cancel'
+            );
+            return;
+          }
+          if (
+            ['apply', 'approve', 'yes', 'y', 'ok', '적용', '승인', '저장'].includes(
+              normalized
+            )
+          ) {
+            await applyPendingDataProposal();
+            return;
+          }
+          if (
+            ['cancel', 'discard', 'no', 'n', '취소', '거절'].includes(normalized)
+          ) {
+            discardPendingDataProposal();
             return;
           }
           if (normalized === 'status') {
             const name = state.dataProcessing.lastFileName || '-';
             const count = state.dataProcessing.features.length;
-            pushDataLog(`lastFile=${name}, features=${count}`);
+            const model = String(dp.modelSelect?.value || 'Balanced (default)').trim() || 'Balanced (default)';
+            const rows = Array.isArray(state.dataProcessing.rawRows) ? state.dataProcessing.rawRows.length : 0;
+            const pending = state.dataProcessing.pendingProposal;
+            pushDataChatMessage(
+              'agent',
+              `현재 상태: 파일=${name}, 행=${rows}, feature=${count}, 모델=${model}, 변경제안=${
+                pending?.runId ? '있음' : '없음'
+              }`
+            );
             return;
           }
           if (normalized === 'list features') {
             if (state.dataProcessing.features.length === 0) {
-              pushDataLog('features: []');
+              pushDataChatMessage('agent', '현재 추출된 feature가 없습니다.');
               return;
             }
-            pushDataLog(`features: ${state.dataProcessing.features.join(', ')}`);
+            pushDataChatMessage('agent', state.dataProcessing.features.join(', '));
             return;
           }
           if (normalized === 'clear features') {
             state.dataProcessing.features = [];
+            state.dataProcessing.rawRows = [];
+            clearDataRunResult();
             renderDataFeatures();
             syncStudioFeaturesFromData();
-            pushDataLog('features cleared');
+            pushDataChatMessage('agent', 'feature를 초기화했습니다.');
             return;
           }
 
-          pushDataLog(`알 수 없는 명령어: ${command}`);
+          const rows = Array.isArray(state.dataProcessing.rawRows) ? state.dataProcessing.rawRows : [];
+          if (rows.length === 0) {
+            const message = '먼저 csv/json 데이터를 업로드해 주세요.';
+            pushDataChatMessage('agent', message);
+            setNotice(dp.notice, message, 'error');
+            return;
+          }
+
+          let selectedModel = String(dp.modelSelect?.value || '').trim();
+          if (!selectedModel || (!selectedModel.startsWith('openai-codex/') && !selectedModel.startsWith('openai/'))) {
+            const fallbackModel = getPreferredDataProcessingModelValue();
+            if (fallbackModel) {
+              selectedModel = fallbackModel;
+              if (dp.modelSelect) {
+                dp.modelSelect.value = fallbackModel;
+              }
+            } else {
+              const message = '데이터 처리 모델은 OpenAI OAuth 모델(openai-codex/... 또는 openai/...)만 지원합니다.';
+              pushDataChatMessage('agent', message);
+              setNotice(dp.notice, message, 'error');
+              return;
+            }
+          }
+
+          setDataCommandBusy(true);
+          clearNotice(dp.notice);
+          try {
+            const result = await requestJson('/api/data/commands/execute', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                model: selectedModel,
+                command,
+                sourceName: state.dataProcessing.lastFileName || null,
+                table: rows,
+              }),
+            });
+
+            if (Array.isArray(result.features)) {
+              state.dataProcessing.features = [...new Set(result.features.map((item) => String(item || '').trim()).filter(Boolean))];
+              renderDataFeatures();
+              syncStudioFeaturesFromData();
+            }
+
+            renderDataRunResult(result);
+            const report = String(result?.report || '').trim();
+            const operations = Array.isArray(result?.operations)
+              ? result.operations
+              : [];
+            const requiresConfirmation = Boolean(result?.requiresConfirmation);
+            const confirmationPrompt = String(result?.confirmationPrompt || '').trim();
+            const baseReply = report || '요청을 처리했습니다.';
+            const followUp = requiresConfirmation
+              ? confirmationPrompt ||
+                `변경 제안 ${operations.length}개를 생성했습니다. apply로 반영하거나 cancel로 취소하세요.`
+              : '';
+            pushDataChatMessage(
+              'agent',
+              followUp ? `${baseReply}\n${followUp}` : baseReply
+            );
+
+            setNotice(
+              dp.notice,
+              requiresConfirmation
+                ? '변경 제안이 생성되었습니다. diff를 확인하고 적용 여부를 선택하세요.'
+                : `모델 실행 완료 (${result.action || '-'})`,
+              'success'
+            );
+          } catch (error) {
+            pushDataChatMessage('agent', `실행 실패: ${error.message}`);
+            setNotice(dp.notice, `모델 실행 실패: ${error.message}`, 'error');
+          } finally {
+            setDataCommandBusy(false);
+          }
         }
 
         function initializeDataProcessingPanel() {
+          renderDataProcessingModelCatalog();
           renderDataFeatures();
           renderDataPreview();
+          clearDataRunResult();
+          setDataCommandBusy(false);
           if (dp.commandLog) {
             dp.commandLog.textContent = state.dataProcessing.logs.join('\n');
           }
 
           dp.pickFileBtn?.addEventListener('click', () => {
             dp.fileInput?.click();
+          });
+
+          dp.modelSelect?.addEventListener('change', () => {
+            state.dataProcessing.modelTouched = true;
           });
 
           dp.fileInput?.addEventListener('change', async (event) => {
@@ -2182,9 +2618,17 @@
             dp.fileInput?.click();
           });
 
-          dp.commandForm?.addEventListener('submit', (event) => {
+          dp.resultApplyBtn?.addEventListener('click', async () => {
+            await applyPendingDataProposal();
+          });
+
+          dp.resultDiscardBtn?.addEventListener('click', () => {
+            discardPendingDataProposal();
+          });
+
+          dp.commandForm?.addEventListener('submit', async (event) => {
             event.preventDefault();
-            executeDataCommand(dp.commandInput?.value || '');
+            await executeDataCommand(dp.commandInput?.value || '');
             if (dp.commandInput) {
               dp.commandInput.value = '';
               dp.commandInput.focus();
@@ -3276,92 +3720,6 @@
           return state.auth.user;
         }
 
-        async function handleLoginSubmit(event) {
-          event.preventDefault();
-          const lockRemainingSec = Math.max(
-            0,
-            Math.ceil((state.auth.lockUntilMs - Date.now()) / 1000)
-          );
-          if (lockRemainingSec > 0) {
-            setAuthNotice(`로그인 시도 제한 상태입니다. ${lockRemainingSec}초 후 다시 시도하세요.`, 'error');
-            setAuthFormBusy(false);
-            return;
-          }
-
-          const email = String(auth.email?.value || '').trim();
-          const password = String(auth.password?.value || '');
-          if (!email || !password) {
-            setAuthNotice('이메일과 비밀번호를 입력하세요.', 'error');
-            return;
-          }
-
-          setAuthFormBusy(true);
-          setAuthNotice('로그인 중입니다...', 'info');
-          try {
-            const response = await requestJson('/api/auth/login', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ email, password }),
-              suppressAuthRedirect: true,
-            });
-            clearLoginLockState();
-            state.auth.user = response?.user || null;
-            updateSignedInUser(state.auth.user);
-            showAppShell();
-            setAuthNotice('로그인 성공', 'success');
-            if (auth.password) {
-              auth.password.value = '';
-            }
-            await Promise.all([
-              refreshAgents(),
-              refreshSkills(),
-              refreshProviderAuth(),
-              refreshModelCatalog(),
-              drawRandomAvatar(),
-            ]);
-            startPolling();
-          } catch (error) {
-            if (error.status === 429) {
-              const retryAfterSec = Number(error.payload?.retryAfterSec || 0);
-              const maxAttempts = Number(error.payload?.maxAttempts || 0);
-              startLoginLockState(retryAfterSec, maxAttempts);
-            } else if (error.status === 401) {
-              const attemptsRemaining = Number(error.payload?.attemptsRemaining);
-              const maxAttempts = Number(error.payload?.maxAttempts);
-              if (Number.isFinite(attemptsRemaining) && Number.isFinite(maxAttempts)) {
-                setAuthNotice(
-                  `로그인 실패: ${error.message} (남은 시도 ${attemptsRemaining}/${maxAttempts})`,
-                  'error'
-                );
-              } else {
-                setAuthNotice(`로그인 실패: ${error.message}`, 'error');
-              }
-            } else {
-              setAuthNotice(`로그인 실패: ${error.message}`, 'error');
-            }
-          } finally {
-            setAuthFormBusy(false);
-          }
-        }
-
-        async function handleLogout() {
-          setActionButtonsDisabled(true);
-          try {
-            await requestJson('/api/auth/logout', {
-              method: 'POST',
-              suppressAuthRedirect: true,
-            });
-          } catch {
-            // ignore logout errors and force local session reset
-          } finally {
-            state.auth.user = null;
-            updateSignedInUser(null);
-            clearLoginLockState();
-            setActionButtonsDisabled(false);
-            showAuthGate('로그아웃되었습니다.', 'info');
-          }
-        }
-
         let initializedPanels = false;
         function initializePanelsOnce() {
           if (initializedPanels) {
@@ -3373,46 +3731,41 @@
           initializedPanels = true;
         }
 
-        async function bootstrapAuthAndApp() {
+        async function bootstrapApp() {
           initializePanelsOnce();
-          auth.form?.addEventListener('submit', handleLoginSubmit);
-          auth.logoutBtn?.addEventListener('click', handleLogout);
-          setAuthFormBusy(false);
 
           try {
-            setAuthNotice('세션을 확인하는 중입니다.', 'info');
-            const user = await refreshMe();
-            if (user) {
-              showAppShell();
-              await Promise.all([
-                refreshAgents(),
-                refreshSkills(),
-                refreshProviderAuth(),
-                refreshModelCatalog(),
-                drawRandomAvatar(),
-              ]);
-              startPolling();
-              return;
-            }
-          } catch {
-            // session not found
+            await refreshMe();
+          } catch (error) {
+            state.auth.user = {
+              name: 'Public',
+              role: 'owner',
+            };
+            updateSignedInUser(state.auth.user);
+            setNotice(ap.notice, `세션 사용자 조회 실패: ${error.message}`, 'info');
           }
 
-          showAuthGate('로그인이 필요합니다.', 'info');
+          await Promise.all([
+            refreshAgents(),
+            refreshSkills(),
+            refreshProviderAuth(),
+            refreshModelCatalog(),
+            drawRandomAvatar(),
+          ]);
+          startPolling();
         }
 
         ac.clearSkillsBtn?.addEventListener('click', clearSelectedSkills);
         ac.rerollAvatarBtn?.addEventListener('click', drawRandomAvatar);
         ac.createBtn?.addEventListener('click', createAgent);
 
-        bootstrapAuthAndApp().catch((error) => {
+        bootstrapApp().catch((error) => {
           console.error('auth bootstrap failed', error);
-          showAuthGate(`초기화 실패: ${error.message}`, 'error');
+          setNotice(ap.notice, `초기화 실패: ${error.message}`, 'error');
         });
 
         window.addEventListener('beforeunload', () => {
           stopPolling();
-          stopLoginLockTimer();
         });
       })();
 
