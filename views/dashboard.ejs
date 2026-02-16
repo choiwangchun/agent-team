@@ -915,6 +915,35 @@
           }
         }
 
+        function preloadImage(url, timeoutMs = 8000) {
+          return new Promise((resolve) => {
+            const targetUrl = String(url || '').trim();
+            if (!targetUrl) {
+              resolve(false);
+              return;
+            }
+
+            const image = new Image();
+            let finished = false;
+            const finish = (ok) => {
+              if (finished) {
+                return;
+              }
+              finished = true;
+              clearTimeout(timer);
+              image.onload = null;
+              image.onerror = null;
+              resolve(Boolean(ok));
+            };
+
+            const timer = setTimeout(() => finish(false), Math.max(500, Number(timeoutMs) || 8000));
+            image.onload = () => finish(true);
+            image.onerror = () => finish(false);
+            image.decoding = 'async';
+            image.src = targetUrl;
+          });
+        }
+
         function renderDataFeatures() {
           if (!dp.featureList || !dp.featureEmpty) {
             return;
@@ -2039,7 +2068,11 @@
           setAvatarLoading(true);
           try {
             const response = await requestJson('/api/avatars/random');
-            renderSelectedAvatar(response.avatar || null);
+            const nextAvatar = response.avatar || null;
+            if (nextAvatar?.url) {
+              await preloadImage(nextAvatar.url);
+            }
+            renderSelectedAvatar(nextAvatar);
           } catch (error) {
             renderSelectedAvatar(null);
             setNotice(ac.notice, `아바타 로드 실패: ${error.message}`, 'error');
