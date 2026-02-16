@@ -13,6 +13,7 @@ const { monitorEventLoopDelay, performance } = require("perf_hooks");
 const { OntologyService } = require("./src/ontology/service");
 const { createRepository } = require("./src/data/repository");
 const { IngestionJobQueue } = require("./src/pipeline/job-queue");
+const { WorkflowScheduler } = require("./src/workflow/workflow-scheduler");
 const {
   buildModelInputSummary,
   buildTablePreview,
@@ -39,6 +40,18 @@ const LATENCY_SAMPLE_SIZE = Math.max(1, Number(process.env.LATENCY_SAMPLE_SIZE |
 const MAX_UPLOAD_SIZE_MB = Math.max(1, Number(process.env.MAX_UPLOAD_SIZE_MB || 20));
 const JOB_POLL_INTERVAL_MS = Math.max(100, Number(process.env.JOB_POLL_INTERVAL_MS || 750));
 const JOB_BATCH_SIZE = Math.max(1, Number(process.env.JOB_BATCH_SIZE || 5));
+const WORKFLOW_POLL_INTERVAL_MS = Math.max(
+  100,
+  Number(process.env.WORKFLOW_POLL_INTERVAL_MS || 900)
+);
+const WORKFLOW_BATCH_SIZE = Math.max(
+  1,
+  Number(process.env.WORKFLOW_BATCH_SIZE || 3)
+);
+const WORKFLOW_TASK_DELAY_MS = Math.max(
+  0,
+  Number(process.env.WORKFLOW_TASK_DELAY_MS || 100)
+);
 const DEFAULT_ACCESS_SECRET = "dev-access-secret-change-this";
 const DEFAULT_REFRESH_SECRET = "dev-refresh-secret-change-this";
 const ACCESS_TOKEN_TTL_SEC = Math.max(
@@ -204,6 +217,12 @@ const jobQueue = new IngestionJobQueue({
   pollIntervalMs: JOB_POLL_INTERVAL_MS,
   maxJobsPerTick: JOB_BATCH_SIZE,
 });
+const workflowScheduler = new WorkflowScheduler({
+  repository,
+  pollIntervalMs: WORKFLOW_POLL_INTERVAL_MS,
+  maxTasksPerTick: WORKFLOW_BATCH_SIZE,
+  taskDelayMs: WORKFLOW_TASK_DELAY_MS,
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -300,6 +319,7 @@ let inflightRequests = 0;
 let initialized = false;
 let initPromise = null;
 let queueStarted = false;
+let workflowSchedulerStarted = false;
 let httpServer = null;
 let oauthCallbackBridgeServer = null;
 let oauthCallbackBridgeAttempted = false;
@@ -473,6 +493,175 @@ function parseCommaSeparated(value) {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function normalizeStringArray(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return [...new Set(input.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function summarizeWorkflowTaskCounts(tasks) {
+  const counts = {
+    total: 0,
+    pending: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+  };
+
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    counts.total += 1;
+    const status = String(task?.status || "").trim().toLowerCase();
+    if (status === "completed") {
+      counts.completed += 1;
+      continue;
+    }
+    if (status === "failed") {
+      counts.failed += 1;
+      continue;
+    }
+    if (status === "running") {
+      counts.running += 1;
+      continue;
+    }
+    counts.pending += 1;
+  }
+
+  return counts;
+}
+
+function buildWorkflowTasksFromRequest({
+  tasksInput,
+  nodesInput,
+  edgesInput,
+  agents,
+  goal,
+}) {
+  const agentsById = new Map(
+    (Array.isArray(agents) ? agents : [])
+      .filter((agent) => agent?.id)
+      .map((agent) => [String(agent.id), agent])
+  );
+  const agentIdsByLowerName = new Map();
+  for (const agent of Array.isArray(agents) ? agents : []) {
+    const key = String(agent?.name || "").trim().toLowerCase();
+    if (!key || agentIdsByLowerName.has(key)) {
+      continue;
+    }
+    agentIdsByLowerName.set(key, String(agent.id));
+  }
+
+  const normalizeKind = (value) => {
+    const safe = String(value || "general").trim().toLowerCase();
+    return safe || "general";
+  };
+
+  const normalizeTaskBase = (item, index) => {
+    const taskKey = String(item?.taskKey || item?.id || `task-${index + 1}`).trim();
+    const title = String(item?.title || item?.name || `Task ${index + 1}`).trim() || `Task ${index + 1}`;
+    const dependsOnTaskKeys = normalizeStringArray(
+      item?.dependsOnTaskKeys || item?.dependsOn
+    );
+
+    let agentId = String(item?.agentId || "").trim();
+    if (!agentId) {
+      const candidateName = String(item?.agentName || item?.name || "").trim().toLowerCase();
+      if (candidateName && agentIdsByLowerName.has(candidateName)) {
+        agentId = agentIdsByLowerName.get(candidateName);
+      }
+    }
+    if (agentId && !agentsById.has(agentId)) {
+      throw new Error(`agent not found for task '${taskKey}': ${agentId}`);
+    }
+
+    return {
+      taskKey,
+      title,
+      kind: normalizeKind(item?.kind),
+      agentId: agentId || null,
+      dependsOnTaskKeys,
+      input: item?.input && typeof item.input === "object" ? item.input : {},
+    };
+  };
+
+  if (Array.isArray(tasksInput) && tasksInput.length > 0) {
+    const tasks = tasksInput.map((item, index) => normalizeTaskBase(item, index));
+    const keySet = new Set(tasks.map((task) => task.taskKey));
+    if (keySet.size !== tasks.length) {
+      throw new Error("duplicate taskKey in tasks");
+    }
+    for (const task of tasks) {
+      for (const depKey of task.dependsOnTaskKeys) {
+        if (!keySet.has(depKey)) {
+          throw new Error(`dependsOn taskKey not found: ${depKey}`);
+        }
+        if (depKey === task.taskKey) {
+          throw new Error(`task cannot depend on itself: ${task.taskKey}`);
+        }
+      }
+    }
+    return tasks;
+  }
+
+  if (Array.isArray(nodesInput) && nodesInput.length > 0) {
+    const nodes = nodesInput.map((item, index) => {
+      const nodeId = String(item?.id || `node-${index + 1}`).trim();
+      const base = normalizeTaskBase(item, index);
+      return {
+        ...base,
+        nodeId,
+        input: {
+          ...(base.input || {}),
+          nodeId,
+        },
+      };
+    });
+
+    const taskByNodeId = new Map(nodes.map((node) => [node.nodeId, node.taskKey]));
+    const dependsOnByTaskKey = new Map(nodes.map((node) => [node.taskKey, new Set()]));
+    for (const edge of Array.isArray(edgesInput) ? edgesInput : []) {
+      const fromId = String(edge?.from || edge?.source || "").trim();
+      const toId = String(edge?.to || edge?.target || "").trim();
+      if (!fromId || !toId) {
+        continue;
+      }
+      const fromTaskKey = taskByNodeId.get(fromId);
+      const toTaskKey = taskByNodeId.get(toId);
+      if (!fromTaskKey || !toTaskKey || fromTaskKey === toTaskKey) {
+        continue;
+      }
+      dependsOnByTaskKey.get(toTaskKey)?.add(fromTaskKey);
+    }
+
+    return nodes.map((node) => ({
+      taskKey: node.taskKey,
+      title: node.title,
+      kind: node.kind,
+      agentId: node.agentId,
+      dependsOnTaskKeys: [
+        ...new Set([
+          ...node.dependsOnTaskKeys,
+          ...Array.from(dependsOnByTaskKey.get(node.taskKey) || []),
+        ]),
+      ],
+      input: node.input,
+    }));
+  }
+
+  return [
+    {
+      taskKey: "task-1",
+      title: "Goal kickoff",
+      kind: "planning",
+      agentId: null,
+      dependsOnTaskKeys: [],
+      input: {
+        goal: String(goal || "").trim(),
+      },
+    },
+  ];
 }
 
 function toPosixPath(value) {
@@ -3002,6 +3191,32 @@ function canAccessDataRun(run, authUser) {
   return String(run.userId || "").trim() === String(authUser.id || "").trim();
 }
 
+function toWorkflowApiResponse(workflow, { tasks = [], events = [] } = {}) {
+  if (!workflow) {
+    return null;
+  }
+
+  return {
+    id: workflow.id,
+    goal: workflow.goal,
+    status: workflow.status,
+    datasetId: workflow.datasetId || null,
+    selectedFeatures: Array.isArray(workflow.selectedFeatures)
+      ? workflow.selectedFeatures
+      : [],
+    createdBy: workflow.createdBy || null,
+    meta: workflow.meta || {},
+    errorMessage: workflow.errorMessage || null,
+    createdAt: workflow.createdAt,
+    updatedAt: workflow.updatedAt,
+    startedAt: workflow.startedAt || null,
+    completedAt: workflow.completedAt || null,
+    taskCounts: summarizeWorkflowTaskCounts(tasks),
+    tasks,
+    events,
+  };
+}
+
 async function ensureDefaultProviderAuthConnections() {
   for (const template of providerAuthTemplates) {
     await repository.upsertProviderAuthConnection({
@@ -3399,6 +3614,13 @@ async function flushQueueForServerless() {
   await jobQueue.processTick();
 }
 
+async function flushWorkflowSchedulerForServerless() {
+  if (!isServerlessRuntime) {
+    return;
+  }
+  await workflowScheduler.processTick();
+}
+
 app.use((req, res, next) => {
   const start = process.hrtime.bigint();
   requestsTotal += 1;
@@ -3464,8 +3686,14 @@ app.get("/healthz", (req, res) => {
     timestamp: new Date().toISOString(),
     storage: repository.type(),
     queue: {
-      pollIntervalMs: JOB_POLL_INTERVAL_MS,
-      batchSize: JOB_BATCH_SIZE,
+      ingestion: {
+        pollIntervalMs: JOB_POLL_INTERVAL_MS,
+        batchSize: JOB_BATCH_SIZE,
+      },
+      workflow: {
+        pollIntervalMs: WORKFLOW_POLL_INTERVAL_MS,
+        batchSize: WORKFLOW_BATCH_SIZE,
+      },
     },
   });
 });
@@ -4524,6 +4752,219 @@ app.patch("/api/deployments/:deploymentId/scale", ...requireOperatorRole, async 
   }
 });
 
+app.get("/api/workflows", authenticate, async (req, res, next) => {
+  try {
+    await flushWorkflowSchedulerForServerless();
+    const limit = toPositiveInt(req.query.limit, 50);
+    const workflows = await repository.listWorkflows(limit);
+    const enriched = await Promise.all(
+      workflows.map(async (workflow) => {
+        const tasks = await repository.listWorkflowTasks(workflow.id);
+        return {
+          ...workflow,
+          taskCounts: summarizeWorkflowTaskCounts(tasks),
+        };
+      })
+    );
+    return res.json({ workflows: enriched });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/workflows/:workflowId", authenticate, async (req, res, next) => {
+  try {
+    await flushWorkflowSchedulerForServerless();
+    const workflowId = String(req.params.workflowId || "").trim();
+    const workflow = await repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return res.status(404).json({
+        error: "workflow_not_found",
+        message: `workflow not found: ${workflowId}`,
+      });
+    }
+
+    const eventLimit = toPositiveInt(req.query.eventLimit, 200);
+    const [tasks, events] = await Promise.all([
+      repository.listWorkflowTasks(workflowId),
+      repository.listWorkflowEvents(workflowId, eventLimit),
+    ]);
+
+    return res.json({
+      workflow: toWorkflowApiResponse(workflow, { tasks, events }),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/workflows/:workflowId/tasks", authenticate, async (req, res, next) => {
+  try {
+    await flushWorkflowSchedulerForServerless();
+    const workflowId = String(req.params.workflowId || "").trim();
+    const workflow = await repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return res.status(404).json({
+        error: "workflow_not_found",
+        message: `workflow not found: ${workflowId}`,
+      });
+    }
+
+    const tasks = await repository.listWorkflowTasks(workflowId);
+    return res.json({
+      tasks,
+      taskCounts: summarizeWorkflowTaskCounts(tasks),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/workflows/:workflowId/events", authenticate, async (req, res, next) => {
+  try {
+    await flushWorkflowSchedulerForServerless();
+    const workflowId = String(req.params.workflowId || "").trim();
+    const workflow = await repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return res.status(404).json({
+        error: "workflow_not_found",
+        message: `workflow not found: ${workflowId}`,
+      });
+    }
+
+    const limit = toPositiveInt(req.query.limit, 200);
+    const events = await repository.listWorkflowEvents(workflowId, limit);
+    return res.json({ events });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/workflows", ...requireOperatorRole, async (req, res) => {
+  try {
+    const goal = String(req.body?.goal || "").trim();
+    if (!goal) {
+      return res.status(400).json({
+        error: "invalid_workflow",
+        message: "goal is required",
+      });
+    }
+
+    const datasetId = String(req.body?.datasetId || "").trim() || null;
+    if (datasetId) {
+      const dataset = await repository.getDataset(datasetId);
+      if (!dataset) {
+        return res.status(404).json({
+          error: "dataset_not_found",
+          message: `dataset not found: ${datasetId}`,
+        });
+      }
+    }
+
+    const selectedFeatures = normalizeStringArray(
+      req.body?.selectedFeatures || req.body?.features
+    );
+    const meta =
+      req.body?.meta && typeof req.body.meta === "object" ? req.body.meta : {};
+
+    const agents = await repository.listAgents(500);
+    const tasks = buildWorkflowTasksFromRequest({
+      tasksInput: req.body?.tasks,
+      nodesInput: req.body?.nodes,
+      edgesInput: req.body?.edges,
+      agents,
+      goal,
+    });
+
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return res.status(400).json({
+        error: "invalid_workflow",
+        message: "workflow requires at least one task",
+      });
+    }
+
+    const workflow = await repository.createWorkflow({
+      goal,
+      datasetId,
+      selectedFeatures,
+      createdBy: req.authUser?.id || null,
+      tasks,
+      meta,
+    });
+
+    await repository.appendWorkflowEvent({
+      workflowId: workflow.id,
+      role: "user",
+      message: goal,
+      meta: {
+        source: "workflow_goal",
+      },
+    });
+    await repository.appendWorkflowEvent({
+      workflowId: workflow.id,
+      role: "system",
+      message: `workflow created with ${tasks.length} task(s)`,
+      meta: {
+        taskCount: tasks.length,
+        hasGraph: Array.isArray(req.body?.nodes) && req.body.nodes.length > 0,
+      },
+    });
+
+    if (isServerlessRuntime) {
+      await workflowScheduler.processTick();
+    }
+
+    const [storedWorkflow, storedTasks, storedEvents] = await Promise.all([
+      repository.getWorkflow(workflow.id),
+      repository.listWorkflowTasks(workflow.id),
+      repository.listWorkflowEvents(workflow.id, 200),
+    ]);
+
+    return res.status(201).json({
+      workflow: toWorkflowApiResponse(storedWorkflow || workflow, {
+        tasks: storedTasks,
+        events: storedEvents,
+      }),
+    });
+  } catch (error) {
+    return res.status(400).json({
+      error: "invalid_workflow",
+      message: error.message,
+    });
+  }
+});
+
+app.post("/api/workflows/:workflowId/tick", ...requireOperatorRole, async (req, res, next) => {
+  try {
+    const workflowId = String(req.params.workflowId || "").trim();
+    const workflow = await repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return res.status(404).json({
+        error: "workflow_not_found",
+        message: `workflow not found: ${workflowId}`,
+      });
+    }
+
+    await workflowScheduler.processTick();
+    await repository.reconcileWorkflowStatus(workflowId);
+
+    const [updatedWorkflow, tasks, events] = await Promise.all([
+      repository.getWorkflow(workflowId),
+      repository.listWorkflowTasks(workflowId),
+      repository.listWorkflowEvents(workflowId, 200),
+    ]);
+
+    return res.json({
+      workflow: toWorkflowApiResponse(updatedWorkflow || workflow, {
+        tasks,
+        events,
+      }),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post("/api/data/upload", ...requireOperatorRole, upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({
@@ -5210,6 +5651,14 @@ function ensureQueueStarted() {
   queueStarted = true;
 }
 
+function ensureWorkflowSchedulerStarted() {
+  if (workflowSchedulerStarted || isServerlessRuntime) {
+    return;
+  }
+  workflowScheduler.start();
+  workflowSchedulerStarted = true;
+}
+
 function registerShutdownHooks() {
   if (shutdownHooksRegistered) {
     return;
@@ -5233,6 +5682,7 @@ function registerShutdownHooks() {
   const shutdown = (signal) => {
     console.log(`Received ${signal}. Shutting down...`);
     jobQueue.stop();
+    workflowScheduler.stop();
     if (httpServer) {
       httpServer.close(() => {
         closeOAuthBridge(() => process.exit(0));
@@ -5254,7 +5704,7 @@ function ensureHttpServerStarted() {
 
   httpServer = app.listen(port, () => {
     console.log(
-      `Dashboard running at http://localhost:${port} (storage=${repository.type()}, queue=${JOB_POLL_INTERVAL_MS}ms, mode=${isServerlessRuntime ? "serverless" : "node"})`
+      `Dashboard running at http://localhost:${port} (storage=${repository.type()}, ingestQueue=${JOB_POLL_INTERVAL_MS}ms, workflowQueue=${WORKFLOW_POLL_INTERVAL_MS}ms, mode=${isServerlessRuntime ? "serverless" : "node"})`
     );
   });
 
@@ -5269,6 +5719,7 @@ async function bootstrap({
 
   if (startQueue) {
     ensureQueueStarted();
+    ensureWorkflowSchedulerStarted();
   }
 
   if (startServer) {

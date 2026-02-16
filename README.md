@@ -79,6 +79,9 @@ npm run start
 - `MAX_UPLOAD_SIZE_MB` (기본 20)
 - `JOB_POLL_INTERVAL_MS` (기본 750)
 - `JOB_BATCH_SIZE` (기본 5)
+- `WORKFLOW_POLL_INTERVAL_MS` (기본 900)
+- `WORKFLOW_BATCH_SIZE` (기본 3)
+- `WORKFLOW_TASK_DELAY_MS` (기본 100ms, 기본 스케줄러의 task 실행 딜레이)
 - `DATA_AI_MAX_ROWS` (기본 5000)
 - `DATA_AI_MAX_COLUMNS` (기본 120)
 - `DATA_AI_CELL_MAX_LENGTH` (기본 2048)
@@ -204,10 +207,20 @@ AVATAR_SUBSET_MAX_MB=900 npm run prepare:avatars:subset
 - `POST /api/deployments` (operator/admin/owner)
 - `PATCH /api/deployments/:deploymentId/scale` (operator/admin/owner)
 
+### Workflow (Agent Team 1차)
+
+- `GET /api/workflows`
+- `POST /api/workflows` (operator/admin/owner)
+- `GET /api/workflows/:workflowId`
+- `GET /api/workflows/:workflowId/tasks`
+- `GET /api/workflows/:workflowId/events`
+- `POST /api/workflows/:workflowId/tick` (operator/admin/owner)
+
 자세한 스펙은 아래 문서를 참고하세요.
 
 - `docs/data-processing-api.md`
 - `docs/agent-ops-api.md`
+- `docs/workflow-api.md`
 
 ## 프로젝트 구조
 
