@@ -3291,6 +3291,7 @@
             return;
           }
 
+          sanitizeStudioEdgesAcyclic({ render: true, notify: true });
           const nodes = buildWorkflowNodePayload();
           const edges = buildWorkflowEdgePayload();
           const selectedFeatures = collectWorkflowFeatureScope();
@@ -3543,6 +3544,92 @@
           pushStudioLog(`노드 추가: ${nodeId} (${agent.name})`);
         }
 
+        function hasForwardPathInEdges(startNodeId, targetNodeId, edges, visiting = new Set()) {
+          if (startNodeId === targetNodeId) {
+            return true;
+          }
+          if (visiting.has(startNodeId)) {
+            return false;
+          }
+          visiting.add(startNodeId);
+          for (const edge of Array.isArray(edges) ? edges : []) {
+            if (String(edge?.from || '') !== startNodeId) {
+              continue;
+            }
+            const nextNodeId = String(edge?.to || '');
+            if (!nextNodeId) {
+              continue;
+            }
+            if (nextNodeId === targetNodeId) {
+              return true;
+            }
+            if (hasForwardPathInEdges(nextNodeId, targetNodeId, edges, visiting)) {
+              return true;
+            }
+          }
+          visiting.delete(startNodeId);
+          return false;
+        }
+
+        function wouldCreateCycleWithEdges(fromNodeId, toNodeId, edges) {
+          if (!fromNodeId || !toNodeId) {
+            return false;
+          }
+          if (fromNodeId === toNodeId) {
+            return true;
+          }
+          return hasForwardPathInEdges(toNodeId, fromNodeId, edges);
+        }
+
+        function sanitizeStudioEdgesAcyclic({ render = true, notify = false } = {}) {
+          const currentEdges = Array.isArray(state.deploymentStudio.edges)
+            ? state.deploymentStudio.edges
+            : [];
+          const nextEdges = [];
+          let removedCount = 0;
+
+          for (const edge of currentEdges) {
+            const fromNodeId = String(edge?.from || '').trim();
+            const toNodeId = String(edge?.to || '').trim();
+            if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) {
+              removedCount += 1;
+              continue;
+            }
+            const hasNodeFrom = Boolean(getNodeById(fromNodeId));
+            const hasNodeTo = Boolean(getNodeById(toNodeId));
+            if (!hasNodeFrom || !hasNodeTo) {
+              removedCount += 1;
+              continue;
+            }
+            const duplicated = nextEdges.some(
+              (saved) => saved.from === fromNodeId && saved.to === toNodeId
+            );
+            if (duplicated) {
+              removedCount += 1;
+              continue;
+            }
+            if (wouldCreateCycleWithEdges(fromNodeId, toNodeId, nextEdges)) {
+              removedCount += 1;
+              continue;
+            }
+            nextEdges.push({ from: fromNodeId, to: toNodeId });
+          }
+
+          if (removedCount > 0 || nextEdges.length !== currentEdges.length) {
+            state.deploymentStudio.edges = nextEdges;
+            if (render) {
+              renderStudioNodes();
+            }
+          }
+
+          if (notify && removedCount > 0) {
+            setNotice(ad.notice, `순환 참조를 만드는 연결 ${removedCount}개를 자동 제거했습니다.`, 'info');
+            pushStudioLog(`순환 방지를 위해 연결 ${removedCount}개 제거`);
+          }
+
+          return removedCount;
+        }
+
         function addEdgeToStudio(fromNodeId, toNodeId) {
           if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) {
             return;
@@ -3551,6 +3638,12 @@
             (edge) => edge.from === fromNodeId && edge.to === toNodeId
           );
           if (alreadyExists) {
+            return;
+          }
+
+          if (wouldCreateCycleWithEdges(fromNodeId, toNodeId, state.deploymentStudio.edges)) {
+            setNotice(ad.notice, '해당 연결은 순환 참조를 만들어 추가할 수 없습니다.', 'info');
+            pushStudioLog(`연결 거부(순환): ${fromNodeId} -> ${toNodeId}`);
             return;
           }
 

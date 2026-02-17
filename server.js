@@ -777,8 +777,9 @@ function buildWorkflowTasksFromRequest({
       ],
       input: node.input,
     }));
-    assertWorkflowTasksAcyclic(tasks);
-    return tasks;
+    const acyclicTasks = makeTaskDependenciesAcyclic(tasks);
+    assertWorkflowTasksAcyclic(acyclicTasks);
+    return acyclicTasks;
   }
 
   return [
@@ -793,6 +794,65 @@ function buildWorkflowTasksFromRequest({
       },
     },
   ];
+}
+
+function makeTaskDependenciesAcyclic(tasks) {
+  const sourceTasks = Array.isArray(tasks) ? tasks : [];
+  const byTaskKey = new Map(
+    sourceTasks
+      .map((task) => [String(task?.taskKey || "").trim(), task])
+      .filter((entry) => entry[0])
+  );
+
+  const acceptedByTaskKey = new Map();
+  const nextByTaskKey = new Map();
+  for (const [taskKey, task] of byTaskKey.entries()) {
+    acceptedByTaskKey.set(taskKey, new Set());
+    nextByTaskKey.set(taskKey, {
+      ...task,
+      dependsOnTaskKeys: [],
+    });
+  }
+
+  const hasPath = (fromTaskKey, targetTaskKey, visiting = new Set()) => {
+    if (fromTaskKey === targetTaskKey) {
+      return true;
+    }
+    if (visiting.has(fromTaskKey)) {
+      return false;
+    }
+    visiting.add(fromTaskKey);
+    const deps = acceptedByTaskKey.get(fromTaskKey) || new Set();
+    for (const depTaskKey of deps) {
+      if (depTaskKey === targetTaskKey) {
+        return true;
+      }
+      if (hasPath(depTaskKey, targetTaskKey, visiting)) {
+        return true;
+      }
+    }
+    visiting.delete(fromTaskKey);
+    return false;
+  };
+
+  for (const [taskKey, task] of byTaskKey.entries()) {
+    const uniqueDeps = normalizeStringArray(task?.dependsOnTaskKeys);
+    for (const depTaskKey of uniqueDeps) {
+      if (!byTaskKey.has(depTaskKey) || depTaskKey === taskKey) {
+        continue;
+      }
+      // 신규 edge(task -> dep)가 cycle을 만들면 버린다.
+      if (hasPath(depTaskKey, taskKey)) {
+        continue;
+      }
+      acceptedByTaskKey.get(taskKey)?.add(depTaskKey);
+      nextByTaskKey.get(taskKey)?.dependsOnTaskKeys.push(depTaskKey);
+    }
+  }
+
+  return sourceTasks
+    .map((task) => nextByTaskKey.get(String(task?.taskKey || "").trim()))
+    .filter(Boolean);
 }
 
 function assertWorkflowTasksAcyclic(tasks) {
