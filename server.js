@@ -630,12 +630,18 @@ function buildWorkflowTasksFromRequest({
     return safe || "general";
   };
 
+  const normalizeExecutionMode = (value) => {
+    const safe = String(value || "parallel").trim().toLowerCase();
+    return safe === "serial" ? "serial" : "parallel";
+  };
+
   const normalizeTaskBase = (item, index) => {
     const taskKey = String(item?.taskKey || item?.id || `task-${index + 1}`).trim();
     const title = String(item?.title || item?.name || `Task ${index + 1}`).trim() || `Task ${index + 1}`;
     const dependsOnTaskKeys = normalizeStringArray(
       item?.dependsOnTaskKeys || item?.dependsOn
     );
+    const executionMode = normalizeExecutionMode(item?.executionMode);
 
     let agentId = String(item?.agentId || "").trim();
     if (!agentId) {
@@ -648,13 +654,22 @@ function buildWorkflowTasksFromRequest({
       throw new Error(`agent not found for task '${taskKey}': ${agentId}`);
     }
 
+    const baseInput =
+      item?.input && typeof item.input === "object" && !Array.isArray(item.input)
+        ? { ...item.input }
+        : {};
+    if (!Object.prototype.hasOwnProperty.call(baseInput, "executionMode")) {
+      baseInput.executionMode = executionMode;
+    }
+
     return {
       taskKey,
       title,
       kind: normalizeKind(item?.kind),
       agentId: agentId || null,
+      executionMode,
       dependsOnTaskKeys,
-      input: item?.input && typeof item.input === "object" ? item.input : {},
+      input: baseInput,
     };
   };
 
@@ -685,6 +700,7 @@ function buildWorkflowTasksFromRequest({
       const input = {
         ...(base.input || {}),
         nodeId,
+        executionMode: base.executionMode,
       };
       if (
         !Object.prototype.hasOwnProperty.call(input, "permissionProfile") &&
@@ -734,6 +750,18 @@ function buildWorkflowTasksFromRequest({
         continue;
       }
       dependsOnByTaskKey.get(toTaskKey)?.add(fromTaskKey);
+    }
+
+    // "serial"로 설정된 노드는 같은 serial 체인 상에서 순차 실행되도록 의존성을 자동 추가한다.
+    let previousSerialTaskKey = "";
+    for (const node of nodes) {
+      if (node.executionMode !== "serial") {
+        continue;
+      }
+      if (previousSerialTaskKey && previousSerialTaskKey !== node.taskKey) {
+        dependsOnByTaskKey.get(node.taskKey)?.add(previousSerialTaskKey);
+      }
+      previousSerialTaskKey = node.taskKey;
     }
 
     const tasks = nodes.map((node) => ({
@@ -6431,6 +6459,35 @@ app.get("/api/agents/:agentId", async (req, res, next) => {
       });
     }
     return res.json({ agent });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.delete("/api/agents/:agentId", ...requireOperatorRole, async (req, res, next) => {
+  try {
+    const agentId = String(req.params.agentId || "").trim();
+    if (!agentId) {
+      return res.status(400).json({
+        error: "invalid_agent",
+        message: "agentId is required",
+      });
+    }
+
+    const removed = await repository.deleteAgent(agentId);
+    if (!removed) {
+      return res.status(404).json({
+        error: "agent_not_found",
+        message: `agent not found: ${agentId}`,
+      });
+    }
+
+    return res.json({
+      removed: {
+        id: removed.id,
+        name: removed.name,
+      },
+    });
   } catch (error) {
     return next(error);
   }

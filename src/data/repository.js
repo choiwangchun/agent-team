@@ -824,6 +824,69 @@ class InMemoryRepository {
     return agent ? deepClone(agent) : null;
   }
 
+  async deleteAgent(agentId) {
+    const key = String(agentId || "").trim();
+    if (!key) {
+      return null;
+    }
+
+    const existing = this.agents.get(key);
+    if (!existing) {
+      return null;
+    }
+
+    this.agents.delete(key);
+
+    for (const [deploymentId, deployment] of this.deployments.entries()) {
+      if (String(deployment?.agentId || "").trim() === key) {
+        this.deployments.delete(deploymentId);
+      }
+    }
+
+    const now = new Date().toISOString();
+    for (const [taskId, task] of this.workflowTasks.entries()) {
+      if (String(task?.agentId || "").trim() !== key) {
+        continue;
+      }
+      const next = {
+        ...task,
+        agentId: null,
+        updatedAt: now,
+      };
+      this.workflowTasks.set(taskId, next);
+    }
+
+    for (const [sessionKey, session] of this.workflowNodeSessions.entries()) {
+      if (String(session?.agentId || "").trim() !== key) {
+        continue;
+      }
+      const nextMeta =
+        session.meta && typeof session.meta === "object"
+          ? {
+              ...session.meta,
+              agentIdentity:
+                session.meta.agentIdentity &&
+                typeof session.meta.agentIdentity === "object"
+                  ? {
+                      ...session.meta.agentIdentity,
+                      removedAgentId: key,
+                    }
+                  : session.meta.agentIdentity,
+            }
+          : {};
+      const next = {
+        ...session,
+        agentId: null,
+        meta: nextMeta,
+        updatedAt: now,
+      };
+      this.workflowNodeSessions.set(sessionKey, next);
+    }
+
+    this.persistState();
+    return deepClone(existing);
+  }
+
   async createDeployment({ agentId, queueName, environment, desiredReplicas, policy }) {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
@@ -2280,6 +2343,40 @@ class PostgresRepository {
       LIMIT 1
       `,
       [agentId]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      modelTier: row.model_tier,
+      systemPrompt: row.system_prompt,
+      tools: row.tools || [],
+      skills: row.skills || row.tools || [],
+      avatarUrl: row.avatar_url || null,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async deleteAgent(agentId) {
+    const key = String(agentId || "").trim();
+    if (!key) {
+      return null;
+    }
+
+    const { rows } = await this.pool.query(
+      `
+      DELETE FROM agents
+      WHERE id = $1
+      RETURNING id, name, model_tier, system_prompt, tools, skills, avatar_url, status, created_at, updated_at
+      `,
+      [key]
     );
 
     if (rows.length === 0) {

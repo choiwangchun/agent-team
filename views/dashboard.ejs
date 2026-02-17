@@ -364,6 +364,17 @@
               </div>
             </div>
             <p id="adSelectedNodeMeta" class="mt-2 text-xs text-slate-500">노드를 클릭하면 사용할 feature를 설정할 수 있습니다.</p>
+            <div class="mt-2">
+              <label for="adNodeExecutionModeSelect" class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">실행 방식</label>
+              <select
+                id="adNodeExecutionModeSelect"
+                class="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none ring-electric/30 transition focus:ring"
+              >
+                <option value="parallel">병렬</option>
+                <option value="serial">직렬</option>
+              </select>
+              <p class="mt-1 text-[11px] text-slate-500">직렬 노드는 같은 직렬 노드들끼리 순차 실행됩니다.</p>
+            </div>
             <div id="adNodeFeatureList" class="mt-2 grid max-h-28 gap-1 overflow-auto pr-1"></div>
             <p id="adNodeFeatureEmpty" class="mt-2 text-xs text-slate-500">데이터 처리 탭에서 feature를 추출하면 여기서 선택할 수 있습니다.</p>
           </div>
@@ -586,6 +597,11 @@
           return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
         }
 
+        function normalizeExecutionMode(value) {
+          const safe = String(value || 'parallel').trim().toLowerCase();
+          return safe === 'serial' ? 'serial' : 'parallel';
+        }
+
         const state = {
           auth: {
             user: null,
@@ -720,6 +736,7 @@
           featurePool: document.getElementById('adFeaturePool'),
           featurePoolEmpty: document.getElementById('adFeaturePoolEmpty'),
           selectedNodeMeta: document.getElementById('adSelectedNodeMeta'),
+          nodeExecutionModeSelect: document.getElementById('adNodeExecutionModeSelect'),
           nodeFeatureList: document.getElementById('adNodeFeatureList'),
           nodeFeatureEmpty: document.getElementById('adNodeFeatureEmpty'),
           assignAllNodeFeaturesBtn: document.getElementById('adAssignAllNodeFeaturesBtn'),
@@ -2765,13 +2782,22 @@
                 : '<span class="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-xs text-slate-400">N/A</span>';
               return `
                 <li class="rounded-xl border border-slate-200 bg-white p-3">
-                  <div class="flex items-start gap-3">
-                    ${avatar}
-                    <div class="min-w-0">
-                      <p class="font-semibold text-slate-900">${escapeHtml(agent.name)}</p>
-                      <p class="mt-1 truncate text-xs text-slate-500">model: ${escapeHtml(agent.modelTier)}</p>
-                      <p class="mt-1 truncate text-xs text-slate-500" title="skills: ${escapeHtml(fullSkills)}">skills: ${escapeHtml(displaySkills)}</p>
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="flex min-w-0 items-start gap-3">
+                      ${avatar}
+                      <div class="min-w-0">
+                        <p class="font-semibold text-slate-900">${escapeHtml(agent.name)}</p>
+                        <p class="mt-1 truncate text-xs text-slate-500">model: ${escapeHtml(agent.modelTier)}</p>
+                        <p class="mt-1 truncate text-xs text-slate-500" title="skills: ${escapeHtml(fullSkills)}">skills: ${escapeHtml(displaySkills)}</p>
+                      </div>
                     </div>
+                    <button
+                      type="button"
+                      data-agent-delete="${escapeHtml(agent.id)}"
+                      class="shrink-0 rounded-lg border border-rose-200 bg-white px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50"
+                    >
+                      해고
+                    </button>
                   </div>
                 </li>
               `;
@@ -2780,7 +2806,7 @@
         }
 
         const studioNodeWidth = 176;
-        const studioNodeHeight = 108;
+        const studioNodeHeight = 124;
         const studioMinZoom = 0.5;
         const studioMaxZoom = 1.8;
 
@@ -2869,6 +2895,22 @@
           return normalizeNodeFeatures(node?.features);
         }
 
+        function getNodeExecutionMode(node) {
+          return normalizeExecutionMode(node?.executionMode);
+        }
+
+        function setNodeExecutionMode(nodeId, executionMode, { rerender = true } = {}) {
+          const node = getNodeById(nodeId);
+          if (!node) {
+            return false;
+          }
+          node.executionMode = normalizeExecutionMode(executionMode);
+          if (rerender) {
+            renderStudioNodes();
+          }
+          return true;
+        }
+
         function setNodeFeatures(nodeId, features, { rerender = true } = {}) {
           const node = getNodeById(nodeId);
           if (!node) {
@@ -2888,6 +2930,7 @@
 
           const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
           const featurePool = getFeaturePool();
+          const modeSelect = ad.nodeExecutionModeSelect;
 
           if (!selectedNode) {
             ad.selectedNodeMeta.textContent = '노드를 클릭하면 사용할 feature를 설정할 수 있습니다.';
@@ -2897,10 +2940,20 @@
               featurePool.length === 0
                 ? '데이터 처리 탭에서 feature를 추출하면 여기서 선택할 수 있습니다.'
                 : '선택된 노드가 없습니다.';
+            if (modeSelect) {
+              modeSelect.value = 'parallel';
+              modeSelect.disabled = true;
+              modeSelect.classList.add('opacity-60');
+            }
             return;
           }
 
           ad.selectedNodeMeta.textContent = `${getNodeTitle(selectedNode)} (${selectedNode.id})`;
+          if (modeSelect) {
+            modeSelect.value = getNodeExecutionMode(selectedNode);
+            modeSelect.disabled = false;
+            modeSelect.classList.remove('opacity-60');
+          }
           if (featurePool.length === 0) {
             ad.nodeFeatureList.innerHTML = '';
             ad.nodeFeatureEmpty.classList.remove('hidden');
@@ -3150,6 +3203,7 @@
             agentId: node.agentId,
             name: getNodeTitle(node),
             kind: 'general',
+            executionMode: getNodeExecutionMode(node),
             input: {
               features: getNodeFeatures(node),
             },
@@ -3419,7 +3473,9 @@
               const agent = getAgentById(node.agentId);
               const skills = Array.isArray(agent?.skills) && agent.skills.length > 0 ? agent.skills.join(', ') : 'none';
               const nodeFeatures = getNodeFeatures(node);
+              const executionMode = getNodeExecutionMode(node);
               node.features = nodeFeatures;
+              node.executionMode = executionMode;
               const featureSummary = nodeFeatures.length > 0 ? truncateForDisplay(nodeFeatures.join(', '), 30) : 'none';
               const avatar = agent?.avatarUrl
                 ? `<img src="${escapeHtml(agent.avatarUrl)}" alt="${escapeHtml(agent.name)} avatar" class="h-8 w-8 rounded-lg border border-slate-200 bg-white object-cover" />`
@@ -3443,6 +3499,7 @@
                       <p class="truncate text-sm font-semibold text-slate-900">${escapeHtml(agent?.name || node.agentName || node.agentId)}</p>
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">model: ${escapeHtml(agent?.modelTier || 'Balanced (default)')}</p>
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">skills: ${escapeHtml(skills)}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-slate-500">mode: ${escapeHtml(executionMode)}</p>
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">features: ${escapeHtml(featureSummary)}</p>
                     </div>
                   </div>
@@ -3477,6 +3534,7 @@
             agentName: agent.name,
             x: Math.round(safeX),
             y: Math.round(safeY),
+            executionMode: 'parallel',
             features: [],
           });
 
@@ -3510,6 +3568,39 @@
           state.deploymentStudio.selectedNodeId = null;
           renderStudioNodes();
           pushStudioLog('캔버스 초기화 완료');
+        }
+
+        function pruneStudioForRemovedAgents(agents, { log = true } = {}) {
+          const existingAgentIds = new Set(
+            (Array.isArray(agents) ? agents : [])
+              .map((agent) => String(agent?.id || '').trim())
+              .filter(Boolean)
+          );
+          const removedNodes = state.deploymentStudio.nodes.filter(
+            (node) => !existingAgentIds.has(String(node?.agentId || '').trim())
+          );
+          if (removedNodes.length === 0) {
+            return 0;
+          }
+
+          const removedNodeIds = new Set(removedNodes.map((node) => node.id));
+          state.deploymentStudio.nodes = state.deploymentStudio.nodes.filter(
+            (node) => !removedNodeIds.has(node.id)
+          );
+          state.deploymentStudio.edges = state.deploymentStudio.edges.filter(
+            (edge) => !removedNodeIds.has(edge.from) && !removedNodeIds.has(edge.to)
+          );
+          if (removedNodeIds.has(state.deploymentStudio.selectedNodeId)) {
+            state.deploymentStudio.selectedNodeId = null;
+          }
+          if (removedNodeIds.has(state.deploymentStudio.pendingFromNodeId)) {
+            state.deploymentStudio.pendingFromNodeId = null;
+          }
+          renderStudioNodes();
+          if (log) {
+            pushStudioLog(`해고된 Agent 노드 제거: ${removedNodes.map((node) => node.id).join(', ')}`);
+          }
+          return removedNodes.length;
         }
 
         function renderAgentSourceList(agents) {
@@ -3582,6 +3673,7 @@
             state.agents = Array.isArray(response.agents) ? response.agents : [];
             renderAgents(state.agents);
             renderAgentSourceList(state.agents);
+            pruneStudioForRemovedAgents(state.agents, { log: false });
           } catch (error) {
             setNotice(ac.notice, `Agent 조회 실패: ${error.message}`, 'error');
           } finally {
@@ -3884,6 +3976,14 @@
             setNodeFeatures(selectedNode.id, Array.from(next));
           });
 
+          ad.nodeExecutionModeSelect?.addEventListener('change', () => {
+            const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
+            if (!selectedNode) {
+              return;
+            }
+            setNodeExecutionMode(selectedNode.id, ad.nodeExecutionModeSelect.value);
+          });
+
           ad.assignAllNodeFeaturesBtn?.addEventListener('click', () => {
             const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
             if (!selectedNode) {
@@ -4057,6 +4157,45 @@
           }
         }
 
+        async function deleteAgent(agentId) {
+          const normalizedAgentId = String(agentId || '').trim();
+          if (!normalizedAgentId) {
+            return;
+          }
+          const target = getAgentById(normalizedAgentId);
+          if (!target) {
+            await refreshAgents();
+            return;
+          }
+
+          const confirmed = window.confirm(`'${target.name}' 에이전트를 해고(삭제)하시겠습니까?`);
+          if (!confirmed) {
+            return;
+          }
+
+          setActionButtonsDisabled(true);
+          try {
+            await requestJson(`/api/agents/${encodeURIComponent(normalizedAgentId)}`, {
+              method: 'DELETE',
+            });
+            state.agents = state.agents.filter((agent) => agent.id !== normalizedAgentId);
+            renderAgents(state.agents);
+            renderAgentSourceList(state.agents);
+            const removedCount = pruneStudioForRemovedAgents(state.agents, { log: true });
+            setNotice(
+              ac.notice,
+              removedCount > 0
+                ? `Agent 해고 완료: ${target.name} (캔버스 노드 ${removedCount}개 제거됨)`
+                : `Agent 해고 완료: ${target.name}`,
+              'success'
+            );
+          } catch (error) {
+            setNotice(ac.notice, `Agent 해고 실패: ${error.message}`, 'error');
+          } finally {
+            setActionButtonsDisabled(false);
+          }
+        }
+
         function startPolling() {
           if (pollTimer) {
             return;
@@ -4124,6 +4263,17 @@
         ac.clearSkillsBtn?.addEventListener('click', clearSelectedSkills);
         ac.rerollAvatarBtn?.addEventListener('click', drawRandomAvatar);
         ac.createBtn?.addEventListener('click', createAgent);
+        ac.list?.addEventListener('click', async (event) => {
+          const target = event.target instanceof Element ? event.target.closest('[data-agent-delete]') : null;
+          if (!target) {
+            return;
+          }
+          const agentId = target.getAttribute('data-agent-delete');
+          if (!agentId) {
+            return;
+          }
+          await deleteAgent(agentId);
+        });
 
         bootstrapApp().catch((error) => {
           console.error('auth bootstrap failed', error);
