@@ -132,6 +132,92 @@ function toDataAiRunResponse(row) {
   };
 }
 
+function toWorkflowResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    goal: row.goal,
+    status: row.status,
+    datasetId: row.dataset_id ?? row.datasetId ?? null,
+    selectedFeatures:
+      row.selected_features_json ?? row.selectedFeatures ?? [],
+    createdBy: row.created_by ?? row.createdBy ?? null,
+    meta: row.meta_json ?? row.meta ?? {},
+    errorMessage: row.error_message ?? row.errorMessage ?? null,
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+    startedAt: row.started_at ?? row.startedAt ?? null,
+    completedAt: row.completed_at ?? row.completedAt ?? null,
+  };
+}
+
+function toWorkflowTaskResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    workflowId: row.workflow_id ?? row.workflowId,
+    agentId: row.agent_id ?? row.agentId ?? null,
+    taskKey: row.task_key ?? row.taskKey,
+    title: row.title,
+    kind: row.kind ?? "general",
+    status: row.status ?? "pending",
+    dependsOn: row.depends_on_json ?? row.dependsOn ?? [],
+    input: row.input_json ?? row.input ?? {},
+    output: row.output_json ?? row.output ?? null,
+    attempts: row.attempts ?? 0,
+    errorMessage: row.error_message ?? row.errorMessage ?? null,
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+    startedAt: row.started_at ?? row.startedAt ?? null,
+    completedAt: row.completed_at ?? row.completedAt ?? null,
+  };
+}
+
+function toWorkflowEventResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    workflowId: row.workflow_id ?? row.workflowId,
+    taskId: row.task_id ?? row.taskId ?? null,
+    role: row.role ?? "system",
+    message: row.message ?? "",
+    meta: row.meta_json ?? row.meta ?? {},
+    createdAt: row.created_at ?? row.createdAt,
+  };
+}
+
+function toWorkflowNodeSessionResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    workflowId: row.workflow_id ?? row.workflowId,
+    nodeId: row.node_id ?? row.nodeId,
+    agentId: row.agent_id ?? row.agentId ?? null,
+    sessionKey: row.session_key ?? row.sessionKey,
+    workingDir: row.working_dir ?? row.workingDir ?? "",
+    permissionProfile:
+      row.permission_profile_json ?? row.permissionProfile ?? {},
+    memorySummary: row.memory_summary ?? row.memorySummary ?? "",
+    memoryTail: row.memory_tail_json ?? row.memoryTail ?? [],
+    meta: row.meta_json ?? row.meta ?? {},
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+    lastUsedAt: row.last_used_at ?? row.lastUsedAt ?? null,
+  };
+}
+
 class InMemoryRepository {
   constructor(options = {}) {
     this.ontologyFields = new Map();
@@ -146,6 +232,10 @@ class InMemoryRepository {
     this.providerAuthConnections = new Map();
     this.providerAuthIdsByProvider = new Map();
     this.dataAiRuns = new Map();
+    this.workflows = new Map();
+    this.workflowTasks = new Map();
+    this.workflowEvents = new Map();
+    this.workflowNodeSessions = new Map();
 
     this.persistEnabled = Boolean(options.persistEnabled);
     this.stateFilePath = this.persistEnabled
@@ -182,9 +272,19 @@ class InMemoryRepository {
       const connections = Array.isArray(parsed?.providerAuthConnections)
         ? parsed.providerAuthConnections
         : [];
+      const agents = Array.isArray(parsed?.agents) ? parsed.agents : [];
+      const deployments = Array.isArray(parsed?.deployments)
+        ? parsed.deployments
+        : [];
+      const workflowNodeSessions = Array.isArray(parsed?.workflowNodeSessions)
+        ? parsed.workflowNodeSessions
+        : [];
 
       this.providerAuthConnections.clear();
       this.providerAuthIdsByProvider.clear();
+      this.agents.clear();
+      this.deployments.clear();
+      this.workflowNodeSessions.clear();
 
       for (const row of connections) {
         const record = toProviderAuthResponse(row);
@@ -193,6 +293,67 @@ class InMemoryRepository {
         }
         this.providerAuthConnections.set(record.id, deepClone(record));
         this.providerAuthIdsByProvider.set(record.provider, record.id);
+      }
+
+      for (const row of agents) {
+        const id = String(row?.id || "").trim();
+        const name = String(row?.name || "").trim();
+        if (!id || !name) {
+          continue;
+        }
+        const now = new Date().toISOString();
+        this.agents.set(id, {
+          id,
+          name,
+          modelTier: String(row?.modelTier || "Balanced (default)").trim(),
+          systemPrompt: String(row?.systemPrompt || "").trim(),
+          tools: Array.isArray(row?.tools)
+            ? [...new Set(row.tools.map((item) => String(item || "").trim()).filter(Boolean))]
+            : [],
+          skills: Array.isArray(row?.skills)
+            ? [...new Set(row.skills.map((item) => String(item || "").trim()).filter(Boolean))]
+            : [],
+          avatarUrl: String(row?.avatarUrl || "").trim() || null,
+          status: String(row?.status || "active").trim() || "active",
+          createdAt: row?.createdAt || now,
+          updatedAt: row?.updatedAt || now,
+        });
+      }
+
+      for (const row of deployments) {
+        const id = String(row?.id || "").trim();
+        const agentId = String(row?.agentId || "").trim();
+        if (!id || !agentId) {
+          continue;
+        }
+        const now = new Date().toISOString();
+        this.deployments.set(id, {
+          id,
+          agentId,
+          queueName: String(row?.queueName || "default").trim() || "default",
+          environment:
+            String(row?.environment || "production").trim() || "production",
+          desiredReplicas: Math.max(1, Number(row?.desiredReplicas) || 1),
+          runningReplicas: Math.max(0, Number(row?.runningReplicas) || 0),
+          status: String(row?.status || "running").trim() || "running",
+          policy:
+            row?.policy && typeof row.policy === "object"
+              ? deepClone(row.policy)
+              : {},
+          createdAt: row?.createdAt || now,
+          updatedAt: row?.updatedAt || now,
+        });
+      }
+
+      for (const row of workflowNodeSessions) {
+        const session = toWorkflowNodeSessionResponse(row);
+        const workflowId = String(session?.workflowId || "").trim();
+        const nodeId = String(session?.nodeId || "").trim();
+        if (!workflowId || !nodeId) {
+          continue;
+        }
+        const key = `${workflowId}::${nodeId}`;
+        this.workflowNodeSessions.set(key, deepClone(session));
       }
     } catch (error) {
       console.warn(
@@ -213,6 +374,13 @@ class InMemoryRepository {
       savedAt: new Date().toISOString(),
       providerAuthConnections: Array.from(this.providerAuthConnections.values()).map((item) =>
         deepClone(item)
+      ),
+      agents: Array.from(this.agents.values()).map((item) => deepClone(item)),
+      deployments: Array.from(this.deployments.values()).map((item) =>
+        deepClone(item)
+      ),
+      workflowNodeSessions: Array.from(this.workflowNodeSessions.values()).map(
+        (item) => deepClone(item)
       ),
     };
 
@@ -639,6 +807,7 @@ class InMemoryRepository {
     };
 
     this.agents.set(id, agent);
+    this.persistState();
     return deepClone(agent);
   }
 
@@ -672,6 +841,7 @@ class InMemoryRepository {
     };
 
     this.deployments.set(id, deployment);
+    this.persistState();
     return deepClone(deployment);
   }
 
@@ -699,6 +869,7 @@ class InMemoryRepository {
     deployment.runningReplicas = nextReplicas;
     deployment.updatedAt = new Date().toISOString();
     this.deployments.set(deploymentId, deployment);
+    this.persistState();
     return deepClone(deployment);
   }
 
@@ -753,6 +924,364 @@ class InMemoryRepository {
     await this.purgeExpiredDataAiRuns();
     const run = this.dataAiRuns.get(String(runId || "").trim());
     return run ? deepClone(run) : null;
+  }
+
+  async createWorkflow({
+    goal,
+    datasetId = null,
+    selectedFeatures = [],
+    createdBy = null,
+    tasks = [],
+    meta = {},
+  }) {
+    const now = new Date().toISOString();
+    const workflowId = crypto.randomUUID();
+    const workflow = {
+      id: workflowId,
+      goal: String(goal || "").trim(),
+      status: "pending",
+      datasetId: datasetId ? String(datasetId).trim() : null,
+      selectedFeatures: Array.isArray(selectedFeatures)
+        ? [...new Set(selectedFeatures.map((item) => String(item || "").trim()).filter(Boolean))]
+        : [],
+      createdBy: createdBy ? String(createdBy).trim() : null,
+      meta: meta && typeof meta === "object" ? deepClone(meta) : {},
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      completedAt: null,
+    };
+
+    const normalizedTasks = Array.isArray(tasks) ? tasks : [];
+    const taskIdByKey = new Map();
+    for (const item of normalizedTasks) {
+      const taskKey = String(item?.taskKey || "").trim();
+      if (!taskKey) {
+        continue;
+      }
+      if (taskIdByKey.has(taskKey)) {
+        throw new Error(`duplicate workflow task key: ${taskKey}`);
+      }
+      taskIdByKey.set(taskKey, crypto.randomUUID());
+    }
+
+    for (const item of normalizedTasks) {
+      const taskKey = String(item?.taskKey || "").trim();
+      if (!taskKey || !taskIdByKey.has(taskKey)) {
+        continue;
+      }
+
+      const dependsOnTaskKeys = Array.isArray(item?.dependsOnTaskKeys)
+        ? item.dependsOnTaskKeys
+        : [];
+      const dependsOnIds = [];
+      for (const dependsOnTaskKeyRaw of dependsOnTaskKeys) {
+        const dependsOnTaskKey = String(dependsOnTaskKeyRaw || "").trim();
+        if (!dependsOnTaskKey) {
+          continue;
+        }
+        const dependencyId = taskIdByKey.get(dependsOnTaskKey);
+        if (!dependencyId) {
+          throw new Error(
+            `workflow task dependency not found: ${dependsOnTaskKey}`
+          );
+        }
+        if (dependencyId !== taskIdByKey.get(taskKey)) {
+          dependsOnIds.push(dependencyId);
+        }
+      }
+
+      const taskRecord = {
+        id: taskIdByKey.get(taskKey),
+        workflowId,
+        agentId: item?.agentId ? String(item.agentId).trim() : null,
+        taskKey,
+        title: String(item?.title || taskKey).trim() || taskKey,
+        kind: String(item?.kind || "general").trim() || "general",
+        status: "pending",
+        dependsOn: [...new Set(dependsOnIds)],
+        input: item?.input && typeof item.input === "object" ? deepClone(item.input) : {},
+        output: null,
+        attempts: 0,
+        errorMessage: null,
+        createdAt: now,
+        updatedAt: now,
+        startedAt: null,
+        completedAt: null,
+      };
+
+      this.workflowTasks.set(taskRecord.id, taskRecord);
+    }
+
+    this.workflows.set(workflowId, workflow);
+    return deepClone(workflow);
+  }
+
+  async listWorkflows(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const workflows = Array.from(this.workflows.values()).sort((a, b) => {
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    return workflows.slice(0, safeLimit).map((workflow) => deepClone(workflow));
+  }
+
+  async getWorkflow(workflowId) {
+    const workflow = this.workflows.get(String(workflowId || "").trim());
+    return workflow ? deepClone(workflow) : null;
+  }
+
+  async listWorkflowTasks(workflowId) {
+    const key = String(workflowId || "").trim();
+    const tasks = Array.from(this.workflowTasks.values())
+      .filter((task) => task.workflowId === key)
+      .sort((a, b) => {
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+    return tasks.map((task) => deepClone(task));
+  }
+
+  async getWorkflowTask(taskId) {
+    const task = this.workflowTasks.get(String(taskId || "").trim());
+    return task ? deepClone(task) : null;
+  }
+
+  async appendWorkflowEvent({
+    workflowId,
+    taskId = null,
+    role = "system",
+    message,
+    meta = {},
+  }) {
+    const event = {
+      id: crypto.randomUUID(),
+      workflowId: String(workflowId || "").trim(),
+      taskId: taskId ? String(taskId).trim() : null,
+      role: String(role || "system").trim() || "system",
+      message: String(message || "").trim(),
+      meta: meta && typeof meta === "object" ? deepClone(meta) : {},
+      createdAt: new Date().toISOString(),
+    };
+    this.workflowEvents.set(event.id, event);
+    return deepClone(event);
+  }
+
+  async listWorkflowEvents(workflowId, limit = 200) {
+    const key = String(workflowId || "").trim();
+    const safeLimit = Math.max(1, Math.min(2000, Number(limit) || 200));
+    const events = Array.from(this.workflowEvents.values())
+      .filter((event) => event.workflowId === key)
+      .sort((a, b) => {
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+    const sliced = events.slice(Math.max(0, events.length - safeLimit));
+    return sliced.map((event) => deepClone(event));
+  }
+
+  async getWorkflowNodeSession(workflowId, nodeId) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      return null;
+    }
+    const key = `${workflowKey}::${nodeKey}`;
+    const record = this.workflowNodeSessions.get(key);
+    return record ? deepClone(record) : null;
+  }
+
+  async listWorkflowNodeSessions(workflowId) {
+    const workflowKey = String(workflowId || "").trim();
+    const sessions = Array.from(this.workflowNodeSessions.values())
+      .filter((session) => String(session?.workflowId || "").trim() === workflowKey)
+      .sort((a, b) => {
+        return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+      });
+    return sessions.map((item) => deepClone(item));
+  }
+
+  async upsertWorkflowNodeSession({
+    workflowId,
+    nodeId,
+    agentId = null,
+    sessionKey = "",
+    workingDir = "",
+    permissionProfile = {},
+    memorySummary = "",
+    memoryTail = [],
+    meta = {},
+    lastUsedAt = null,
+  }) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      throw new Error("workflowId and nodeId are required");
+    }
+
+    const now = new Date().toISOString();
+    const key = `${workflowKey}::${nodeKey}`;
+    const previous = this.workflowNodeSessions.get(key);
+
+    const next = {
+      id: previous?.id || crypto.randomUUID(),
+      workflowId: workflowKey,
+      nodeId: nodeKey,
+      agentId: agentId ? String(agentId).trim() : previous?.agentId || null,
+      sessionKey:
+        String(sessionKey || "").trim() ||
+        previous?.sessionKey ||
+        `${workflowKey}:${nodeKey}`,
+      workingDir:
+        String(workingDir || "").trim() || previous?.workingDir || "",
+      permissionProfile:
+        permissionProfile && typeof permissionProfile === "object"
+          ? deepClone(permissionProfile)
+          : previous?.permissionProfile && typeof previous.permissionProfile === "object"
+            ? deepClone(previous.permissionProfile)
+            : {},
+      memorySummary:
+        String(memorySummary || "").trim() || previous?.memorySummary || "",
+      memoryTail: Array.isArray(memoryTail)
+        ? deepClone(memoryTail)
+        : Array.isArray(previous?.memoryTail)
+          ? deepClone(previous.memoryTail)
+          : [],
+      meta:
+        meta && typeof meta === "object"
+          ? deepClone(meta)
+          : previous?.meta && typeof previous.meta === "object"
+            ? deepClone(previous.meta)
+            : {},
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      lastUsedAt: lastUsedAt ? new Date(lastUsedAt).toISOString() : now,
+    };
+
+    this.workflowNodeSessions.set(key, next);
+    this.persistState();
+    return deepClone(next);
+  }
+
+  async claimPendingWorkflowTask() {
+    const pendingTasks = Array.from(this.workflowTasks.values())
+      .filter((task) => task.status === "pending")
+      .sort((a, b) => {
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+    for (const task of pendingTasks) {
+      const workflow = this.workflows.get(task.workflowId);
+      if (!workflow) {
+        continue;
+      }
+      if (!["pending", "running"].includes(String(workflow.status || "").trim())) {
+        continue;
+      }
+
+      const isReady = (task.dependsOn || []).every((dependencyId) => {
+        const dependency = this.workflowTasks.get(dependencyId);
+        return dependency && dependency.status === "completed";
+      });
+      if (!isReady) {
+        continue;
+      }
+
+      task.status = "running";
+      task.startedAt = task.startedAt || new Date().toISOString();
+      task.updatedAt = new Date().toISOString();
+      task.attempts = Math.max(0, Number(task.attempts) || 0) + 1;
+      task.errorMessage = null;
+      this.workflowTasks.set(task.id, task);
+
+      if (workflow.status === "pending") {
+        workflow.status = "running";
+        workflow.startedAt = workflow.startedAt || new Date().toISOString();
+        workflow.updatedAt = new Date().toISOString();
+        this.workflows.set(workflow.id, workflow);
+      }
+
+      return deepClone(task);
+    }
+
+    return null;
+  }
+
+  async completeWorkflowTask(taskId, output = {}) {
+    const key = String(taskId || "").trim();
+    const task = this.workflowTasks.get(key);
+    if (!task) {
+      return null;
+    }
+
+    task.status = "completed";
+    task.output = output && typeof output === "object" ? deepClone(output) : {};
+    task.errorMessage = null;
+    task.completedAt = new Date().toISOString();
+    task.updatedAt = task.completedAt;
+    this.workflowTasks.set(key, task);
+    return deepClone(task);
+  }
+
+  async failWorkflowTask(taskId, errorMessage) {
+    const key = String(taskId || "").trim();
+    const task = this.workflowTasks.get(key);
+    if (!task) {
+      return null;
+    }
+
+    const failureMessage = String(errorMessage || "workflow_task_failed").trim();
+    task.status = "failed";
+    task.errorMessage = failureMessage;
+    task.completedAt = new Date().toISOString();
+    task.updatedAt = task.completedAt;
+    this.workflowTasks.set(key, task);
+
+    const workflow = this.workflows.get(task.workflowId);
+    if (workflow) {
+      workflow.errorMessage = failureMessage;
+      workflow.updatedAt = new Date().toISOString();
+      this.workflows.set(workflow.id, workflow);
+    }
+
+    return deepClone(task);
+  }
+
+  async reconcileWorkflowStatus(workflowId) {
+    const key = String(workflowId || "").trim();
+    const workflow = this.workflows.get(key);
+    if (!workflow) {
+      return null;
+    }
+
+    const tasks = Array.from(this.workflowTasks.values()).filter(
+      (task) => task.workflowId === key
+    );
+    const total = tasks.length;
+    const failed = tasks.filter((task) => task.status === "failed").length;
+    const completed = tasks.filter((task) => task.status === "completed").length;
+    const running = tasks.filter((task) => task.status === "running").length;
+
+    let nextStatus = "pending";
+    if (failed > 0) {
+      nextStatus = "failed";
+    } else if (total > 0 && completed === total) {
+      nextStatus = "completed";
+    } else if (running > 0 || completed > 0) {
+      nextStatus = "running";
+    }
+
+    workflow.status = nextStatus;
+    workflow.updatedAt = new Date().toISOString();
+    if (nextStatus === "running") {
+      workflow.startedAt = workflow.startedAt || workflow.updatedAt;
+      workflow.completedAt = null;
+    } else if (nextStatus === "completed" || nextStatus === "failed") {
+      workflow.completedAt = workflow.completedAt || workflow.updatedAt;
+    } else {
+      workflow.completedAt = null;
+    }
+
+    this.workflows.set(key, workflow);
+    return deepClone(workflow);
   }
 }
 
@@ -927,6 +1456,96 @@ class PostgresRepository {
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_data_ai_runs_expires_at
       ON data_ai_runs (expires_at);
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS workflows (
+        id TEXT PRIMARY KEY,
+        goal TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+        selected_features_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_by TEXT REFERENCES app_users(id) ON DELETE SET NULL,
+        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS workflow_tasks (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        task_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'general',
+        status TEXT NOT NULL DEFAULT 'pending',
+        depends_on_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_json JSONB,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        UNIQUE (workflow_id, task_key)
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS workflow_events (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        task_id TEXT REFERENCES workflow_tasks(id) ON DELETE SET NULL,
+        role TEXT NOT NULL DEFAULT 'system',
+        message TEXT NOT NULL,
+        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS workflow_node_sessions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        session_key TEXT NOT NULL,
+        working_dir TEXT NOT NULL DEFAULT '',
+        permission_profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        memory_summary TEXT NOT NULL DEFAULT '',
+        memory_tail_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        last_used_at TIMESTAMPTZ,
+        UNIQUE (workflow_id, node_id)
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_workflows_created_at
+      ON workflows (created_at DESC);
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_workflow_tasks_workflow_status
+      ON workflow_tasks (workflow_id, status, created_at);
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow_created
+      ON workflow_events (workflow_id, created_at);
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_workflow_node_sessions_workflow_updated
+      ON workflow_node_sessions (workflow_id, updated_at DESC);
     `);
   }
 
@@ -1882,6 +2501,557 @@ class PostgresRepository {
     );
 
     return rows.length > 0 ? toDataAiRunResponse(rows[0]) : null;
+  }
+
+  async createWorkflow({
+    goal,
+    datasetId = null,
+    selectedFeatures = [],
+    createdBy = null,
+    tasks = [],
+    meta = {},
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const workflowId = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+      const normalizedFeatures = Array.isArray(selectedFeatures)
+        ? [...new Set(selectedFeatures.map((item) => String(item || "").trim()).filter(Boolean))]
+        : [];
+
+      const insertedWorkflow = await client.query(
+        `
+        INSERT INTO workflows (
+          id, goal, status, dataset_id, selected_features_json, created_by, meta_json,
+          error_message, created_at, updated_at, started_at, completed_at
+        )
+        VALUES (
+          $1, $2, 'pending', $3, $4::jsonb, $5, $6::jsonb,
+          NULL, $7::timestamptz, $7::timestamptz, NULL, NULL
+        )
+        RETURNING id, goal, status, dataset_id, selected_features_json, created_by, meta_json,
+                  error_message, created_at, updated_at, started_at, completed_at
+        `,
+        [
+          workflowId,
+          String(goal || "").trim(),
+          datasetId ? String(datasetId).trim() : null,
+          JSON.stringify(normalizedFeatures),
+          createdBy ? String(createdBy).trim() : null,
+          JSON.stringify(meta && typeof meta === "object" ? meta : {}),
+          createdAt,
+        ]
+      );
+
+      const normalizedTasks = Array.isArray(tasks) ? tasks : [];
+      const taskIdByKey = new Map();
+      for (const item of normalizedTasks) {
+        const taskKey = String(item?.taskKey || "").trim();
+        if (!taskKey) {
+          continue;
+        }
+        if (taskIdByKey.has(taskKey)) {
+          throw new Error(`duplicate workflow task key: ${taskKey}`);
+        }
+        taskIdByKey.set(taskKey, crypto.randomUUID());
+      }
+
+      for (const item of normalizedTasks) {
+        const taskKey = String(item?.taskKey || "").trim();
+        if (!taskKey || !taskIdByKey.has(taskKey)) {
+          continue;
+        }
+
+        const dependsOnTaskKeys = Array.isArray(item?.dependsOnTaskKeys)
+          ? item.dependsOnTaskKeys
+          : [];
+        const dependsOnIds = [];
+        for (const dependsOnTaskKeyRaw of dependsOnTaskKeys) {
+          const dependsOnTaskKey = String(dependsOnTaskKeyRaw || "").trim();
+          if (!dependsOnTaskKey) {
+            continue;
+          }
+          const dependencyId = taskIdByKey.get(dependsOnTaskKey);
+          if (!dependencyId) {
+            throw new Error(
+              `workflow task dependency not found: ${dependsOnTaskKey}`
+            );
+          }
+          if (dependencyId !== taskIdByKey.get(taskKey)) {
+            dependsOnIds.push(dependencyId);
+          }
+        }
+
+        await client.query(
+          `
+          INSERT INTO workflow_tasks (
+            id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+            attempts, error_message, created_at, updated_at, started_at, completed_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, 'pending', $7::jsonb, $8::jsonb, NULL,
+            0, NULL, $9::timestamptz, $9::timestamptz, NULL, NULL
+          )
+          `,
+          [
+            taskIdByKey.get(taskKey),
+            workflowId,
+            item?.agentId ? String(item.agentId).trim() : null,
+            taskKey,
+            String(item?.title || taskKey).trim() || taskKey,
+            String(item?.kind || "general").trim() || "general",
+            JSON.stringify([...new Set(dependsOnIds)]),
+            JSON.stringify(
+              item?.input && typeof item.input === "object" ? item.input : {}
+            ),
+            createdAt,
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+      return toWorkflowResponse(insertedWorkflow.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listWorkflows(limit = 50) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, goal, status, dataset_id, selected_features_json, created_by, meta_json,
+             error_message, created_at, updated_at, started_at, completed_at
+      FROM workflows
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+    return rows.map((row) => toWorkflowResponse(row));
+  }
+
+  async getWorkflow(workflowId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, goal, status, dataset_id, selected_features_json, created_by, meta_json,
+             error_message, created_at, updated_at, started_at, completed_at
+      FROM workflows
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [String(workflowId || "").trim()]
+    );
+    return rows.length > 0 ? toWorkflowResponse(rows[0]) : null;
+  }
+
+  async listWorkflowTasks(workflowId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+             attempts, error_message, created_at, updated_at, started_at, completed_at
+      FROM workflow_tasks
+      WHERE workflow_id = $1
+      ORDER BY created_at ASC
+      `,
+      [String(workflowId || "").trim()]
+    );
+    return rows.map((row) => toWorkflowTaskResponse(row));
+  }
+
+  async getWorkflowTask(taskId) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+             attempts, error_message, created_at, updated_at, started_at, completed_at
+      FROM workflow_tasks
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [String(taskId || "").trim()]
+    );
+    return rows.length > 0 ? toWorkflowTaskResponse(rows[0]) : null;
+  }
+
+  async appendWorkflowEvent({
+    workflowId,
+    taskId = null,
+    role = "system",
+    message,
+    meta = {},
+  }) {
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO workflow_events (id, workflow_id, task_id, role, message, meta_json, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::timestamptz)
+      RETURNING id, workflow_id, task_id, role, message, meta_json, created_at
+      `,
+      [
+        id,
+        String(workflowId || "").trim(),
+        taskId ? String(taskId).trim() : null,
+        String(role || "system").trim() || "system",
+        String(message || "").trim(),
+        JSON.stringify(meta && typeof meta === "object" ? meta : {}),
+        createdAt,
+      ]
+    );
+    return toWorkflowEventResponse(rows[0]);
+  }
+
+  async listWorkflowEvents(workflowId, limit = 200) {
+    const safeLimit = Math.max(1, Math.min(2000, Number(limit) || 200));
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, task_id, role, message, meta_json, created_at
+      FROM workflow_events
+      WHERE workflow_id = $1
+      ORDER BY created_at ASC
+      LIMIT $2
+      `,
+      [String(workflowId || "").trim(), safeLimit]
+    );
+    return rows.map((row) => toWorkflowEventResponse(row));
+  }
+
+  async getWorkflowNodeSession(workflowId, nodeId) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      return null;
+    }
+
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, node_id, agent_id, session_key, working_dir,
+             permission_profile_json, memory_summary, memory_tail_json, meta_json,
+             created_at, updated_at, last_used_at
+      FROM workflow_node_sessions
+      WHERE workflow_id = $1 AND node_id = $2
+      LIMIT 1
+      `,
+      [workflowKey, nodeKey]
+    );
+    return rows.length > 0 ? toWorkflowNodeSessionResponse(rows[0]) : null;
+  }
+
+  async listWorkflowNodeSessions(workflowId) {
+    const workflowKey = String(workflowId || "").trim();
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, node_id, agent_id, session_key, working_dir,
+             permission_profile_json, memory_summary, memory_tail_json, meta_json,
+             created_at, updated_at, last_used_at
+      FROM workflow_node_sessions
+      WHERE workflow_id = $1
+      ORDER BY updated_at ASC
+      `,
+      [workflowKey]
+    );
+    return rows.map((row) => toWorkflowNodeSessionResponse(row));
+  }
+
+  async upsertWorkflowNodeSession({
+    workflowId,
+    nodeId,
+    agentId = null,
+    sessionKey = "",
+    workingDir = "",
+    permissionProfile = {},
+    memorySummary = "",
+    memoryTail = [],
+    meta = {},
+    lastUsedAt = null,
+  }) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      throw new Error("workflowId and nodeId are required");
+    }
+
+    const now = new Date().toISOString();
+    const existing = await this.getWorkflowNodeSession(workflowKey, nodeKey);
+    const resolvedSessionKey =
+      String(sessionKey || "").trim() ||
+      String(existing?.sessionKey || "").trim() ||
+      `${workflowKey}:${nodeKey}`;
+
+    const resolvedWorkingDir =
+      String(workingDir || "").trim() ||
+      String(existing?.workingDir || "").trim() ||
+      "";
+    const resolvedPermissionProfile =
+      permissionProfile && typeof permissionProfile === "object"
+        ? permissionProfile
+        : existing?.permissionProfile && typeof existing.permissionProfile === "object"
+          ? existing.permissionProfile
+          : {};
+    const resolvedMemorySummary =
+      String(memorySummary || "").trim() ||
+      String(existing?.memorySummary || "").trim() ||
+      "";
+    const resolvedMemoryTail = Array.isArray(memoryTail)
+      ? memoryTail
+      : Array.isArray(existing?.memoryTail)
+        ? existing.memoryTail
+        : [];
+    const resolvedMeta =
+      meta && typeof meta === "object"
+        ? meta
+        : existing?.meta && typeof existing.meta === "object"
+          ? existing.meta
+          : {};
+    const resolvedLastUsedAt = lastUsedAt
+      ? new Date(lastUsedAt).toISOString()
+      : now;
+
+    const id = String(existing?.id || "").trim() || crypto.randomUUID();
+    const createdAt = existing?.createdAt
+      ? new Date(existing.createdAt).toISOString()
+      : now;
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO workflow_node_sessions (
+        id, workflow_id, node_id, agent_id, session_key, working_dir,
+        permission_profile_json, memory_summary, memory_tail_json, meta_json,
+        created_at, updated_at, last_used_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6,
+        $7::jsonb, $8, $9::jsonb, $10::jsonb,
+        $11::timestamptz, $12::timestamptz, $13::timestamptz
+      )
+      ON CONFLICT (workflow_id, node_id)
+      DO UPDATE SET
+        agent_id = EXCLUDED.agent_id,
+        session_key = EXCLUDED.session_key,
+        working_dir = EXCLUDED.working_dir,
+        permission_profile_json = EXCLUDED.permission_profile_json,
+        memory_summary = EXCLUDED.memory_summary,
+        memory_tail_json = EXCLUDED.memory_tail_json,
+        meta_json = EXCLUDED.meta_json,
+        updated_at = EXCLUDED.updated_at,
+        last_used_at = EXCLUDED.last_used_at
+      RETURNING id, workflow_id, node_id, agent_id, session_key, working_dir,
+                permission_profile_json, memory_summary, memory_tail_json, meta_json,
+                created_at, updated_at, last_used_at
+      `,
+      [
+        id,
+        workflowKey,
+        nodeKey,
+        agentId ? String(agentId).trim() : null,
+        resolvedSessionKey,
+        resolvedWorkingDir,
+        JSON.stringify(resolvedPermissionProfile),
+        resolvedMemorySummary,
+        JSON.stringify(resolvedMemoryTail),
+        JSON.stringify(resolvedMeta),
+        createdAt,
+        now,
+        resolvedLastUsedAt,
+      ]
+    );
+
+    return rows.length > 0 ? toWorkflowNodeSessionResponse(rows[0]) : null;
+  }
+
+  async claimPendingWorkflowTask() {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const candidate = await client.query(
+        `
+        SELECT t.id
+        FROM workflow_tasks t
+        JOIN workflows w ON w.id = t.workflow_id
+        WHERE t.status = 'pending'
+          AND w.status IN ('pending', 'running')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(COALESCE(t.depends_on_json, '[]'::jsonb)) dep(dep_task_id)
+            JOIN workflow_tasks d ON d.id = dep.dep_task_id
+            WHERE d.status <> 'completed'
+          )
+        ORDER BY t.created_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        `
+      );
+
+      if (candidate.rows.length === 0) {
+        await client.query("COMMIT");
+        return null;
+      }
+
+      const taskId = candidate.rows[0].id;
+      const claimed = await client.query(
+        `
+        UPDATE workflow_tasks
+        SET
+          status = 'running',
+          started_at = COALESCE(started_at, NOW()),
+          updated_at = NOW(),
+          attempts = attempts + 1,
+          error_message = NULL
+        WHERE id = $1
+        RETURNING id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+                  attempts, error_message, created_at, updated_at, started_at, completed_at
+        `,
+        [taskId]
+      );
+
+      if (claimed.rows.length > 0) {
+        const workflowId = claimed.rows[0].workflow_id;
+        await client.query(
+          `
+          UPDATE workflows
+          SET
+            status = CASE WHEN status = 'pending' THEN 'running' ELSE status END,
+            started_at = COALESCE(started_at, NOW()),
+            updated_at = NOW()
+          WHERE id = $1
+          `,
+          [workflowId]
+        );
+      }
+
+      await client.query("COMMIT");
+      return claimed.rows.length > 0
+        ? toWorkflowTaskResponse(claimed.rows[0])
+        : null;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeWorkflowTask(taskId, output = {}) {
+    const { rows } = await this.pool.query(
+      `
+      UPDATE workflow_tasks
+      SET
+        status = 'completed',
+        output_json = $2::jsonb,
+        error_message = NULL,
+        completed_at = NOW(),
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+                attempts, error_message, created_at, updated_at, started_at, completed_at
+      `,
+      [
+        String(taskId || "").trim(),
+        JSON.stringify(output && typeof output === "object" ? output : {}),
+      ]
+    );
+    return rows.length > 0 ? toWorkflowTaskResponse(rows[0]) : null;
+  }
+
+  async failWorkflowTask(taskId, errorMessage) {
+    const message = String(errorMessage || "workflow_task_failed").trim();
+    const { rows } = await this.pool.query(
+      `
+      UPDATE workflow_tasks
+      SET
+        status = 'failed',
+        error_message = $2,
+        completed_at = NOW(),
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+                attempts, error_message, created_at, updated_at, started_at, completed_at
+      `,
+      [String(taskId || "").trim(), message]
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+
+    await this.pool.query(
+      `
+      UPDATE workflows
+      SET error_message = $2, updated_at = NOW()
+      WHERE id = $1
+      `,
+      [rows[0].workflow_id, message]
+    );
+    return toWorkflowTaskResponse(rows[0]);
+  }
+
+  async reconcileWorkflowStatus(workflowId) {
+    const key = String(workflowId || "").trim();
+    const { rows } = await this.pool.query(
+      `
+      SELECT
+        COUNT(*)::int AS total_count,
+        COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_count,
+        COUNT(*) FILTER (WHERE status = 'running')::int AS running_count,
+        COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_count,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_count
+      FROM workflow_tasks
+      WHERE workflow_id = $1
+      `,
+      [key]
+    );
+    const summary = rows[0] || {
+      total_count: 0,
+      pending_count: 0,
+      running_count: 0,
+      completed_count: 0,
+      failed_count: 0,
+    };
+
+    const total = Number(summary.total_count) || 0;
+    const failed = Number(summary.failed_count) || 0;
+    const completed = Number(summary.completed_count) || 0;
+    const running = Number(summary.running_count) || 0;
+
+    let nextStatus = "pending";
+    if (failed > 0) {
+      nextStatus = "failed";
+    } else if (total > 0 && completed === total) {
+      nextStatus = "completed";
+    } else if (running > 0 || completed > 0) {
+      nextStatus = "running";
+    }
+
+    const update = await this.pool.query(
+      `
+      UPDATE workflows
+      SET
+        status = $2,
+        started_at = CASE
+          WHEN $2 = 'running' THEN COALESCE(started_at, NOW())
+          ELSE started_at
+        END,
+        completed_at = CASE
+          WHEN $2 IN ('completed', 'failed') THEN COALESCE(completed_at, NOW())
+          WHEN $2 = 'running' THEN NULL
+          ELSE completed_at
+        END,
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, goal, status, dataset_id, selected_features_json, created_by, meta_json,
+                error_message, created_at, updated_at, started_at, completed_at
+      `,
+      [key, nextStatus]
+    );
+
+    return update.rows.length > 0
+      ? toWorkflowResponse(update.rows[0])
+      : null;
   }
 }
 
