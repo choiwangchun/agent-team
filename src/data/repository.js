@@ -195,6 +195,29 @@ function toWorkflowEventResponse(row) {
   };
 }
 
+function toWorkflowNodeSessionResponse(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    workflowId: row.workflow_id ?? row.workflowId,
+    nodeId: row.node_id ?? row.nodeId,
+    agentId: row.agent_id ?? row.agentId ?? null,
+    sessionKey: row.session_key ?? row.sessionKey,
+    workingDir: row.working_dir ?? row.workingDir ?? "",
+    permissionProfile:
+      row.permission_profile_json ?? row.permissionProfile ?? {},
+    memorySummary: row.memory_summary ?? row.memorySummary ?? "",
+    memoryTail: row.memory_tail_json ?? row.memoryTail ?? [],
+    meta: row.meta_json ?? row.meta ?? {},
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+    lastUsedAt: row.last_used_at ?? row.lastUsedAt ?? null,
+  };
+}
+
 class InMemoryRepository {
   constructor(options = {}) {
     this.ontologyFields = new Map();
@@ -212,6 +235,7 @@ class InMemoryRepository {
     this.workflows = new Map();
     this.workflowTasks = new Map();
     this.workflowEvents = new Map();
+    this.workflowNodeSessions = new Map();
 
     this.persistEnabled = Boolean(options.persistEnabled);
     this.stateFilePath = this.persistEnabled
@@ -248,9 +272,19 @@ class InMemoryRepository {
       const connections = Array.isArray(parsed?.providerAuthConnections)
         ? parsed.providerAuthConnections
         : [];
+      const agents = Array.isArray(parsed?.agents) ? parsed.agents : [];
+      const deployments = Array.isArray(parsed?.deployments)
+        ? parsed.deployments
+        : [];
+      const workflowNodeSessions = Array.isArray(parsed?.workflowNodeSessions)
+        ? parsed.workflowNodeSessions
+        : [];
 
       this.providerAuthConnections.clear();
       this.providerAuthIdsByProvider.clear();
+      this.agents.clear();
+      this.deployments.clear();
+      this.workflowNodeSessions.clear();
 
       for (const row of connections) {
         const record = toProviderAuthResponse(row);
@@ -259,6 +293,67 @@ class InMemoryRepository {
         }
         this.providerAuthConnections.set(record.id, deepClone(record));
         this.providerAuthIdsByProvider.set(record.provider, record.id);
+      }
+
+      for (const row of agents) {
+        const id = String(row?.id || "").trim();
+        const name = String(row?.name || "").trim();
+        if (!id || !name) {
+          continue;
+        }
+        const now = new Date().toISOString();
+        this.agents.set(id, {
+          id,
+          name,
+          modelTier: String(row?.modelTier || "Balanced (default)").trim(),
+          systemPrompt: String(row?.systemPrompt || "").trim(),
+          tools: Array.isArray(row?.tools)
+            ? [...new Set(row.tools.map((item) => String(item || "").trim()).filter(Boolean))]
+            : [],
+          skills: Array.isArray(row?.skills)
+            ? [...new Set(row.skills.map((item) => String(item || "").trim()).filter(Boolean))]
+            : [],
+          avatarUrl: String(row?.avatarUrl || "").trim() || null,
+          status: String(row?.status || "active").trim() || "active",
+          createdAt: row?.createdAt || now,
+          updatedAt: row?.updatedAt || now,
+        });
+      }
+
+      for (const row of deployments) {
+        const id = String(row?.id || "").trim();
+        const agentId = String(row?.agentId || "").trim();
+        if (!id || !agentId) {
+          continue;
+        }
+        const now = new Date().toISOString();
+        this.deployments.set(id, {
+          id,
+          agentId,
+          queueName: String(row?.queueName || "default").trim() || "default",
+          environment:
+            String(row?.environment || "production").trim() || "production",
+          desiredReplicas: Math.max(1, Number(row?.desiredReplicas) || 1),
+          runningReplicas: Math.max(0, Number(row?.runningReplicas) || 0),
+          status: String(row?.status || "running").trim() || "running",
+          policy:
+            row?.policy && typeof row.policy === "object"
+              ? deepClone(row.policy)
+              : {},
+          createdAt: row?.createdAt || now,
+          updatedAt: row?.updatedAt || now,
+        });
+      }
+
+      for (const row of workflowNodeSessions) {
+        const session = toWorkflowNodeSessionResponse(row);
+        const workflowId = String(session?.workflowId || "").trim();
+        const nodeId = String(session?.nodeId || "").trim();
+        if (!workflowId || !nodeId) {
+          continue;
+        }
+        const key = `${workflowId}::${nodeId}`;
+        this.workflowNodeSessions.set(key, deepClone(session));
       }
     } catch (error) {
       console.warn(
@@ -279,6 +374,13 @@ class InMemoryRepository {
       savedAt: new Date().toISOString(),
       providerAuthConnections: Array.from(this.providerAuthConnections.values()).map((item) =>
         deepClone(item)
+      ),
+      agents: Array.from(this.agents.values()).map((item) => deepClone(item)),
+      deployments: Array.from(this.deployments.values()).map((item) =>
+        deepClone(item)
+      ),
+      workflowNodeSessions: Array.from(this.workflowNodeSessions.values()).map(
+        (item) => deepClone(item)
       ),
     };
 
@@ -705,6 +807,7 @@ class InMemoryRepository {
     };
 
     this.agents.set(id, agent);
+    this.persistState();
     return deepClone(agent);
   }
 
@@ -738,6 +841,7 @@ class InMemoryRepository {
     };
 
     this.deployments.set(id, deployment);
+    this.persistState();
     return deepClone(deployment);
   }
 
@@ -765,6 +869,7 @@ class InMemoryRepository {
     deployment.runningReplicas = nextReplicas;
     deployment.updatedAt = new Date().toISOString();
     this.deployments.set(deploymentId, deployment);
+    this.persistState();
     return deepClone(deployment);
   }
 
@@ -971,6 +1076,89 @@ class InMemoryRepository {
       });
     const sliced = events.slice(Math.max(0, events.length - safeLimit));
     return sliced.map((event) => deepClone(event));
+  }
+
+  async getWorkflowNodeSession(workflowId, nodeId) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      return null;
+    }
+    const key = `${workflowKey}::${nodeKey}`;
+    const record = this.workflowNodeSessions.get(key);
+    return record ? deepClone(record) : null;
+  }
+
+  async listWorkflowNodeSessions(workflowId) {
+    const workflowKey = String(workflowId || "").trim();
+    const sessions = Array.from(this.workflowNodeSessions.values())
+      .filter((session) => String(session?.workflowId || "").trim() === workflowKey)
+      .sort((a, b) => {
+        return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+      });
+    return sessions.map((item) => deepClone(item));
+  }
+
+  async upsertWorkflowNodeSession({
+    workflowId,
+    nodeId,
+    agentId = null,
+    sessionKey = "",
+    workingDir = "",
+    permissionProfile = {},
+    memorySummary = "",
+    memoryTail = [],
+    meta = {},
+    lastUsedAt = null,
+  }) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      throw new Error("workflowId and nodeId are required");
+    }
+
+    const now = new Date().toISOString();
+    const key = `${workflowKey}::${nodeKey}`;
+    const previous = this.workflowNodeSessions.get(key);
+
+    const next = {
+      id: previous?.id || crypto.randomUUID(),
+      workflowId: workflowKey,
+      nodeId: nodeKey,
+      agentId: agentId ? String(agentId).trim() : previous?.agentId || null,
+      sessionKey:
+        String(sessionKey || "").trim() ||
+        previous?.sessionKey ||
+        `${workflowKey}:${nodeKey}`,
+      workingDir:
+        String(workingDir || "").trim() || previous?.workingDir || "",
+      permissionProfile:
+        permissionProfile && typeof permissionProfile === "object"
+          ? deepClone(permissionProfile)
+          : previous?.permissionProfile && typeof previous.permissionProfile === "object"
+            ? deepClone(previous.permissionProfile)
+            : {},
+      memorySummary:
+        String(memorySummary || "").trim() || previous?.memorySummary || "",
+      memoryTail: Array.isArray(memoryTail)
+        ? deepClone(memoryTail)
+        : Array.isArray(previous?.memoryTail)
+          ? deepClone(previous.memoryTail)
+          : [],
+      meta:
+        meta && typeof meta === "object"
+          ? deepClone(meta)
+          : previous?.meta && typeof previous.meta === "object"
+            ? deepClone(previous.meta)
+            : {},
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      lastUsedAt: lastUsedAt ? new Date(lastUsedAt).toISOString() : now,
+    };
+
+    this.workflowNodeSessions.set(key, next);
+    this.persistState();
+    return deepClone(next);
   }
 
   async claimPendingWorkflowTask() {
@@ -1322,6 +1510,25 @@ class PostgresRepository {
     `);
 
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS workflow_node_sessions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        session_key TEXT NOT NULL,
+        working_dir TEXT NOT NULL DEFAULT '',
+        permission_profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        memory_summary TEXT NOT NULL DEFAULT '',
+        memory_tail_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        last_used_at TIMESTAMPTZ,
+        UNIQUE (workflow_id, node_id)
+      );
+    `);
+
+    await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_workflows_created_at
       ON workflows (created_at DESC);
     `);
@@ -1334,6 +1541,11 @@ class PostgresRepository {
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow_created
       ON workflow_events (workflow_id, created_at);
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_workflow_node_sessions_workflow_updated
+      ON workflow_node_sessions (workflow_id, updated_at DESC);
     `);
   }
 
@@ -2507,6 +2719,149 @@ class PostgresRepository {
       [String(workflowId || "").trim(), safeLimit]
     );
     return rows.map((row) => toWorkflowEventResponse(row));
+  }
+
+  async getWorkflowNodeSession(workflowId, nodeId) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      return null;
+    }
+
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, node_id, agent_id, session_key, working_dir,
+             permission_profile_json, memory_summary, memory_tail_json, meta_json,
+             created_at, updated_at, last_used_at
+      FROM workflow_node_sessions
+      WHERE workflow_id = $1 AND node_id = $2
+      LIMIT 1
+      `,
+      [workflowKey, nodeKey]
+    );
+    return rows.length > 0 ? toWorkflowNodeSessionResponse(rows[0]) : null;
+  }
+
+  async listWorkflowNodeSessions(workflowId) {
+    const workflowKey = String(workflowId || "").trim();
+    const { rows } = await this.pool.query(
+      `
+      SELECT id, workflow_id, node_id, agent_id, session_key, working_dir,
+             permission_profile_json, memory_summary, memory_tail_json, meta_json,
+             created_at, updated_at, last_used_at
+      FROM workflow_node_sessions
+      WHERE workflow_id = $1
+      ORDER BY updated_at ASC
+      `,
+      [workflowKey]
+    );
+    return rows.map((row) => toWorkflowNodeSessionResponse(row));
+  }
+
+  async upsertWorkflowNodeSession({
+    workflowId,
+    nodeId,
+    agentId = null,
+    sessionKey = "",
+    workingDir = "",
+    permissionProfile = {},
+    memorySummary = "",
+    memoryTail = [],
+    meta = {},
+    lastUsedAt = null,
+  }) {
+    const workflowKey = String(workflowId || "").trim();
+    const nodeKey = String(nodeId || "").trim();
+    if (!workflowKey || !nodeKey) {
+      throw new Error("workflowId and nodeId are required");
+    }
+
+    const now = new Date().toISOString();
+    const existing = await this.getWorkflowNodeSession(workflowKey, nodeKey);
+    const resolvedSessionKey =
+      String(sessionKey || "").trim() ||
+      String(existing?.sessionKey || "").trim() ||
+      `${workflowKey}:${nodeKey}`;
+
+    const resolvedWorkingDir =
+      String(workingDir || "").trim() ||
+      String(existing?.workingDir || "").trim() ||
+      "";
+    const resolvedPermissionProfile =
+      permissionProfile && typeof permissionProfile === "object"
+        ? permissionProfile
+        : existing?.permissionProfile && typeof existing.permissionProfile === "object"
+          ? existing.permissionProfile
+          : {};
+    const resolvedMemorySummary =
+      String(memorySummary || "").trim() ||
+      String(existing?.memorySummary || "").trim() ||
+      "";
+    const resolvedMemoryTail = Array.isArray(memoryTail)
+      ? memoryTail
+      : Array.isArray(existing?.memoryTail)
+        ? existing.memoryTail
+        : [];
+    const resolvedMeta =
+      meta && typeof meta === "object"
+        ? meta
+        : existing?.meta && typeof existing.meta === "object"
+          ? existing.meta
+          : {};
+    const resolvedLastUsedAt = lastUsedAt
+      ? new Date(lastUsedAt).toISOString()
+      : now;
+
+    const id = String(existing?.id || "").trim() || crypto.randomUUID();
+    const createdAt = existing?.createdAt
+      ? new Date(existing.createdAt).toISOString()
+      : now;
+
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO workflow_node_sessions (
+        id, workflow_id, node_id, agent_id, session_key, working_dir,
+        permission_profile_json, memory_summary, memory_tail_json, meta_json,
+        created_at, updated_at, last_used_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6,
+        $7::jsonb, $8, $9::jsonb, $10::jsonb,
+        $11::timestamptz, $12::timestamptz, $13::timestamptz
+      )
+      ON CONFLICT (workflow_id, node_id)
+      DO UPDATE SET
+        agent_id = EXCLUDED.agent_id,
+        session_key = EXCLUDED.session_key,
+        working_dir = EXCLUDED.working_dir,
+        permission_profile_json = EXCLUDED.permission_profile_json,
+        memory_summary = EXCLUDED.memory_summary,
+        memory_tail_json = EXCLUDED.memory_tail_json,
+        meta_json = EXCLUDED.meta_json,
+        updated_at = EXCLUDED.updated_at,
+        last_used_at = EXCLUDED.last_used_at
+      RETURNING id, workflow_id, node_id, agent_id, session_key, working_dir,
+                permission_profile_json, memory_summary, memory_tail_json, meta_json,
+                created_at, updated_at, last_used_at
+      `,
+      [
+        id,
+        workflowKey,
+        nodeKey,
+        agentId ? String(agentId).trim() : null,
+        resolvedSessionKey,
+        resolvedWorkingDir,
+        JSON.stringify(resolvedPermissionProfile),
+        resolvedMemorySummary,
+        JSON.stringify(resolvedMemoryTail),
+        JSON.stringify(resolvedMeta),
+        createdAt,
+        now,
+        resolvedLastUsedAt,
+      ]
+    );
+
+    return rows.length > 0 ? toWorkflowNodeSessionResponse(rows[0]) : null;
   }
 
   async claimPendingWorkflowTask() {

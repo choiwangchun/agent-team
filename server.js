@@ -26,6 +26,16 @@ const {
   sanitizeExecutionRows,
 } = require("./src/data/ai-processing");
 const { runPythonDataTransform } = require("./src/data/python-transformer");
+const {
+  runLocalCommands,
+  normalizeCommandList,
+  normalizePermissionProfile,
+} = require("./src/workflow/local-command-runner");
+const {
+  appendMailboxMessage,
+  readUnreadMailboxMessages,
+  markMailboxMessagesRead,
+} = require("./src/workflow/team-mailbox");
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -162,6 +172,57 @@ const DATA_AI_PYTHON_SCRIPT =
     process.env.DATA_AI_PYTHON_SCRIPT ||
       path.join(process.cwd(), "scripts", "data_transformer.py")
   ).trim() || path.join(process.cwd(), "scripts", "data_transformer.py");
+const WORKFLOW_LOCAL_EXEC_ENABLED =
+  String(process.env.WORKFLOW_LOCAL_EXEC_ENABLED || "false")
+    .trim()
+    .toLowerCase() === "true";
+const WORKFLOW_LOCAL_EXEC_MAX_STEPS = Math.max(
+  1,
+  Number(process.env.WORKFLOW_LOCAL_EXEC_MAX_STEPS || 3)
+);
+const WORKFLOW_LOCAL_EXEC_MAX_COMMANDS = Math.max(
+  1,
+  Number(process.env.WORKFLOW_LOCAL_EXEC_MAX_COMMANDS || 3)
+);
+const WORKFLOW_LOCAL_EXEC_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.WORKFLOW_LOCAL_EXEC_TIMEOUT_MS || 45000)
+);
+const WORKFLOW_LOCAL_EXEC_OUTPUT_MAX_CHARS = Math.max(
+  512,
+  Number(process.env.WORKFLOW_LOCAL_EXEC_OUTPUT_MAX_CHARS || 12000)
+);
+const WORKFLOW_LOCAL_EXEC_CWD =
+  String(process.env.WORKFLOW_LOCAL_EXEC_CWD || process.cwd()).trim() ||
+  process.cwd();
+const WORKFLOW_LOCAL_EXEC_SHELL =
+  String(process.env.WORKFLOW_LOCAL_EXEC_SHELL || process.env.SHELL || "zsh").trim() ||
+  "zsh";
+const WORKFLOW_NODE_SESSION_ROOT =
+  String(
+    process.env.WORKFLOW_NODE_SESSION_ROOT ||
+      path.join(process.cwd(), ".cache", "workflow-node-sessions")
+  ).trim() || path.join(process.cwd(), ".cache", "workflow-node-sessions");
+const WORKFLOW_NODE_MEMORY_TAIL_MAX = Math.max(
+  4,
+  Number(process.env.WORKFLOW_NODE_MEMORY_TAIL_MAX || 20)
+);
+const WORKFLOW_NODE_MEMORY_SUMMARY_MAX = Math.max(
+  200,
+  Number(process.env.WORKFLOW_NODE_MEMORY_SUMMARY_MAX || 4000)
+);
+const WORKFLOW_AGENT_TEAMS_ENABLED =
+  String(process.env.WORKFLOW_AGENT_TEAMS_ENABLED || "true")
+    .trim()
+    .toLowerCase() !== "false";
+const WORKFLOW_AGENT_INBOX_MAX_MESSAGES = Math.max(
+  1,
+  Number(process.env.WORKFLOW_AGENT_INBOX_MAX_MESSAGES || 20)
+);
+const WORKFLOW_AGENT_OUTBOX_MAX_MESSAGES = Math.max(
+  1,
+  Number(process.env.WORKFLOW_AGENT_OUTBOX_MAX_MESSAGES || 8)
+);
 const PROVIDER_OAUTH_CHALLENGE_TTL_SEC = Math.max(
   120,
   Number(process.env.PROVIDER_OAUTH_CHALLENGE_TTL_SEC || 10 * 60)
@@ -219,6 +280,7 @@ const jobQueue = new IngestionJobQueue({
 });
 const workflowScheduler = new WorkflowScheduler({
   repository,
+  taskExecutor: executeWorkflowTaskWithAgent,
   pollIntervalMs: WORKFLOW_POLL_INTERVAL_MS,
   maxTasksPerTick: WORKFLOW_BATCH_SIZE,
   taskDelayMs: WORKFLOW_TASK_DELAY_MS,
@@ -303,6 +365,16 @@ const openaiCodexModelCatalog = Object.freeze([
     label: "gpt-5.1-codex-mini",
   }),
   Object.freeze({ provider: "openai-codex", id: "gpt-5.1", label: "gpt-5.1" }),
+]);
+const WORKFLOW_TEAM_COLOR_PALETTE = Object.freeze([
+  "red",
+  "blue",
+  "green",
+  "yellow",
+  "purple",
+  "orange",
+  "pink",
+  "cyan",
 ]);
 const providerAuthTemplateById = new Map(
   providerAuthTemplates.map((item) => [item.provider, item])
@@ -610,13 +682,41 @@ function buildWorkflowTasksFromRequest({
     const nodes = nodesInput.map((item, index) => {
       const nodeId = String(item?.id || `node-${index + 1}`).trim();
       const base = normalizeTaskBase(item, index);
+      const input = {
+        ...(base.input || {}),
+        nodeId,
+      };
+      if (
+        !Object.prototype.hasOwnProperty.call(input, "permissionProfile") &&
+        item &&
+        Object.prototype.hasOwnProperty.call(item, "permissionProfile")
+      ) {
+        input.permissionProfile = item.permissionProfile;
+      }
+      if (
+        !Object.prototype.hasOwnProperty.call(input, "permissions") &&
+        item &&
+        item.permissions &&
+        typeof item.permissions === "object"
+      ) {
+        input.permissions = item.permissions;
+      }
+      if (
+        !Object.prototype.hasOwnProperty.call(input, "allowCommands") &&
+        Array.isArray(item?.allowCommands)
+      ) {
+        input.allowCommands = item.allowCommands;
+      }
+      if (
+        !Object.prototype.hasOwnProperty.call(input, "denyPatterns") &&
+        Array.isArray(item?.denyPatterns)
+      ) {
+        input.denyPatterns = item.denyPatterns;
+      }
       return {
         ...base,
         nodeId,
-        input: {
-          ...(base.input || {}),
-          nodeId,
-        },
+        input,
       };
     });
 
@@ -2984,7 +3084,7 @@ async function requestDataTransformPlanFromOpenAICodex({
         content: [{ type: "input_text", text: userPrompt }],
       },
     ],
-    text: { verbosity: "medium" },
+    text: { verbosity: "high" },
     include: ["reasoning.encrypted_content"],
     tool_choice: "auto",
     parallel_tool_calls: true,
@@ -3194,6 +3294,1690 @@ async function requestDataTransformPlanFromOpenAI({
   });
 }
 
+function truncateSingleLine(value, maxLength = 320) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, Math.max(16, Number(maxLength) || 320));
+}
+
+function extractJsonObjectTextLoose(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && fenced[1]) {
+    return String(fenced[1]).trim();
+  }
+
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return raw.slice(start, end + 1);
+  }
+
+  return raw;
+}
+
+function parseJsonObjectLoose(text) {
+  const candidate = extractJsonObjectTextLoose(text);
+  if (!candidate) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(candidate);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // ignore parse failures and fallback to plain text handling
+  }
+
+  return {};
+}
+
+function normalizeShortTextArray(value, { maxItems = 8, maxLength = 220 } = {}) {
+  const limit = Math.max(1, Number(maxItems) || 8);
+  const textLimit = Math.max(24, Number(maxLength) || 220);
+  const list = [];
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = truncateSingleLine(item, textLimit);
+      if (!text) {
+        continue;
+      }
+      list.push(text);
+      if (list.length >= limit) {
+        break;
+      }
+    }
+    return list;
+  }
+
+  if (typeof value === "string") {
+    const parts = value
+      .split(/\n|•|- |\u2022|;/g)
+      .map((item) => truncateSingleLine(item, textLimit))
+      .filter(Boolean);
+    return parts.slice(0, limit);
+  }
+
+  return [];
+}
+
+function normalizeCommandArray(value, maxItems = 3) {
+  const fromArray = Array.isArray(value) ? value : [];
+  const fromString =
+    typeof value === "string"
+      ? value
+          .split(/\n|;/g)
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+      : [];
+  return normalizeCommandList(
+    fromArray.length > 0 ? fromArray : fromString,
+    Math.max(1, Number(maxItems) || 3)
+  );
+}
+
+function normalizeTeamMessageArray(value, maxItems = 8) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const limit = Math.max(1, Number(maxItems) || 8);
+  const out = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const typeRaw = String(item.type || "message").trim().toLowerCase();
+    const type = typeRaw === "broadcast" ? "broadcast" : "message";
+    const recipientTaskKey = String(
+      item.recipientTaskKey || item.recipient || item.toTaskKey || ""
+    ).trim();
+    const content = String(item.content || item.text || "").trim();
+    const summary = truncateSingleLine(item.summary || "", 180);
+    if (!content) {
+      continue;
+    }
+    if (type === "message" && !recipientTaskKey) {
+      continue;
+    }
+    out.push({
+      type,
+      recipientTaskKey,
+      content: content.slice(0, 4000),
+      summary,
+    });
+    if (out.length >= limit) {
+      break;
+    }
+  }
+  return out;
+}
+
+function normalizeLongText(value, maxLength = 16000) {
+  const limit = Math.max(200, Number(maxLength) || 16000);
+  if (typeof value === "string") {
+    return String(value || "").trim().slice(0, limit);
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, limit);
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value, null, 2).slice(0, limit);
+  }
+  return "";
+}
+
+function parseWorkflowTaskModelOutput(text) {
+  const rawText = String(text || "").trim();
+  const parsed = parseJsonObjectLoose(rawText);
+  const deliverable = normalizeLongText(
+    parsed.deliverable ||
+      parsed.report ||
+      parsed.analysis ||
+      parsed.body ||
+      parsed.article ||
+      parsed.answerDetailed ||
+      "",
+    20000
+  );
+
+  const summaryCandidate =
+    parsed.summary ||
+    deliverable ||
+    parsed.answer ||
+    parsed.message ||
+    parsed.result ||
+    rawText;
+  const summary =
+    truncateSingleLine(summaryCandidate, 360) ||
+    "작업 결과 요약이 비어 있습니다.";
+
+  const insights = normalizeShortTextArray(
+    parsed.insights || parsed.findings || parsed.highlights,
+    {
+      maxItems: 12,
+      maxLength: 240,
+    }
+  );
+  const nextActions = normalizeShortTextArray(
+    parsed.nextActions || parsed.next_steps || parsed.actions,
+    {
+      maxItems: 10,
+      maxLength: 220,
+    }
+  );
+
+  const commands = normalizeCommandArray(
+    parsed.commands || parsed.shellCommands || parsed.toolCommands,
+    WORKFLOW_LOCAL_EXEC_MAX_COMMANDS
+  );
+  const messages = normalizeTeamMessageArray(
+    parsed.messages || parsed.teamMessages || parsed.mailboxMessages,
+    WORKFLOW_AGENT_OUTBOX_MAX_MESSAGES
+  );
+  const statusRaw = String(parsed.status || "").trim().toLowerCase();
+  const status = ["blocked", "needs_commands", "completed"].includes(statusRaw)
+    ? statusRaw
+    : commands.length > 0
+      ? "needs_commands"
+      : "completed";
+
+  return {
+    summary,
+    deliverable,
+    insights,
+    nextActions,
+    commands,
+    messages,
+    status,
+    rawText: rawText.slice(0, 12000),
+  };
+}
+
+async function buildWorkflowTaskDatasetContext(workflow, task) {
+  const datasetId = String(workflow?.datasetId || "").trim();
+  if (!datasetId) {
+    return null;
+  }
+
+  const dataset = await repository.getDataset(datasetId);
+  if (!dataset) {
+    return null;
+  }
+
+  const normalizedRows = Array.isArray(dataset.normalizedRows)
+    ? dataset.normalizedRows
+    : [];
+  const sanitized = sanitizeExecutionRows(normalizedRows, {
+    maxRows: Math.min(DATA_AI_MAX_ROWS, 1200),
+    maxColumns: Math.min(DATA_AI_MAX_COLUMNS, 64),
+    maxCellLength: 180,
+  });
+  const allColumns = collectColumns(sanitized.rows);
+
+  const workflowFeatures = normalizeStringArray(workflow?.selectedFeatures || []);
+  const taskFeatures = normalizeStringArray(task?.input?.features || []);
+  const preferredColumns = normalizeStringArray([...taskFeatures, ...workflowFeatures]).filter(
+    (column) => allColumns.includes(column)
+  );
+  const usedColumns = (preferredColumns.length > 0 ? preferredColumns : allColumns).slice(
+    0,
+    24
+  );
+
+  const scopedRows = sanitized.rows.slice(0, 80).map((row) => {
+    const next = {};
+    for (const column of usedColumns) {
+      next[column] = row?.[column] ?? null;
+    }
+    return next;
+  });
+
+  const summary = buildModelInputSummary(scopedRows, {
+    sampleRows: 30,
+    maxColumns: Math.max(1, Math.min(24, usedColumns.length || 24)),
+    maxRowsInPrompt: 20,
+    maxCellLength: 120,
+  });
+
+  return {
+    datasetId: dataset.id,
+    sourceName: dataset.sourceName || null,
+    rowCount: Number(dataset.rowCount) || normalizedRows.length,
+    totalColumns: allColumns.length,
+    workflowFeatures: workflowFeatures.slice(0, 120),
+    taskFeatures: taskFeatures.slice(0, 120),
+    usedColumns,
+    summary,
+  };
+}
+
+function buildWorkflowTaskPromptPayload({
+  workflow,
+  task,
+  agent,
+  agentLabel,
+  taskTitle,
+  taskKind,
+  dependencyOutputs,
+  datasetContext,
+  localExec = null,
+  commandHistory = [],
+  nodeSession = null,
+  teamContext = null,
+}) {
+  const agentInstruction = String(agent?.systemPrompt || "").trim().slice(0, 5000);
+  const localExecEnabled = Boolean(localExec?.enabled);
+  const teamEnabled = Boolean(teamContext?.enabled);
+  const maxCommands = Math.max(
+    1,
+    Number(localExec?.maxCommands || WORKFLOW_LOCAL_EXEC_MAX_COMMANDS)
+  );
+  const permissionProfile = normalizePermissionProfile(
+    localExec?.permissionProfile && typeof localExec.permissionProfile === "object"
+      ? localExec.permissionProfile
+      : {}
+  );
+  const systemPrompt = [
+    "You are an autonomous specialist agent inside a multi-agent workflow.",
+    `Agent name: ${agentLabel}.`,
+    agentInstruction
+      ? `Follow this agent system instruction strictly: ${agentInstruction}`
+      : "No custom system instruction is provided.",
+    "Respond in Korean.",
+    "Return ONLY one valid JSON object.",
+    "Required JSON keys: summary, deliverable, insights, nextActions, status, commands, messages.",
+    "summary: one concise sentence describing the task result.",
+    "deliverable: the full work artifact (detailed analysis/report/draft) in Korean plain text.",
+    "deliverable must be concrete and usable immediately, not a placeholder sentence.",
+    "insights: array of key findings for this task.",
+    "nextActions: array of concrete handoff items for downstream tasks.",
+    "status: completed, blocked, or needs_commands.",
+    localExecEnabled
+      ? `commands: optional array of shell commands (max ${maxCommands}) when local execution is required.`
+      : "commands: always return empty array because local execution is disabled.",
+    localExecEnabled
+      ? "If you need command execution before finalizing, set status to needs_commands and provide commands."
+      : "Do not request command execution.",
+    teamEnabled
+      ? "messages: optional array for teammate communication. message item schema: {type:'message'|'broadcast', recipientTaskKey?:string, content:string, summary?:string}. Use 'message' for specific teammate and 'broadcast' sparingly."
+      : "messages: always return empty array when team messaging is disabled.",
+    teamEnabled
+      ? "팀원에게 전달할 정보는 반드시 messages를 사용하세요. 일반 텍스트만 작성하면 팀원에게 전달되지 않습니다."
+      : "팀 메시징 비활성화 상태입니다.",
+    "Do not include markdown code fences.",
+  ].join(" ");
+
+  const payload = {
+    workflow: {
+      id: workflow?.id || null,
+      goal: String(workflow?.goal || "").trim(),
+      selectedFeatures: normalizeStringArray(workflow?.selectedFeatures || []).slice(
+        0,
+        120
+      ),
+      meta: workflow?.meta && typeof workflow.meta === "object" ? workflow.meta : {},
+    },
+    task: {
+      id: task?.id || null,
+      taskKey: task?.taskKey || null,
+      title: taskTitle,
+      kind: taskKind,
+      input: task?.input && typeof task.input === "object" ? task.input : {},
+    },
+    dependencies: Array.isArray(dependencyOutputs)
+      ? dependencyOutputs.map((item) => ({
+          taskId: item.taskId,
+          taskKey: item.taskKey,
+          title: item.title,
+          status: item.status,
+          summary: item.summary,
+          output: item.output,
+        }))
+      : [],
+    dataset: datasetContext
+      ? {
+          datasetId: datasetContext.datasetId,
+          sourceName: datasetContext.sourceName,
+          rowCount: datasetContext.rowCount,
+          totalColumns: datasetContext.totalColumns,
+          workflowFeatures: datasetContext.workflowFeatures,
+          taskFeatures: datasetContext.taskFeatures,
+          usedColumns: datasetContext.usedColumns,
+          summary: datasetContext.summary,
+        }
+      : null,
+    session: nodeSession
+      ? {
+          sessionKey: String(nodeSession.sessionKey || "").trim(),
+          nodeId: String(nodeSession.nodeId || "").trim(),
+          workingDir: String(nodeSession.workingDir || "").trim(),
+          permissionProfile:
+            nodeSession.permissionProfile &&
+            typeof nodeSession.permissionProfile === "object"
+              ? nodeSession.permissionProfile
+              : {},
+          memorySummary: truncateSingleLine(
+            nodeSession.memorySummary || "",
+            WORKFLOW_NODE_MEMORY_SUMMARY_MAX
+          ),
+          memoryTail: toPromptMemoryTail(nodeSession.memoryTail, 8),
+        }
+      : null,
+    team: teamEnabled
+      ? {
+          teamName: String(teamContext?.teamName || "").trim(),
+          self:
+            teamContext?.self && typeof teamContext.self === "object"
+              ? teamContext.self
+              : null,
+          leader:
+            teamContext?.leader && typeof teamContext.leader === "object"
+              ? teamContext.leader
+              : null,
+          inboxMessages: Array.isArray(teamContext?.inboxMessages)
+            ? teamContext.inboxMessages.slice(0, WORKFLOW_AGENT_INBOX_MAX_MESSAGES)
+            : [],
+        }
+      : null,
+    localExecution: {
+      enabled: localExecEnabled,
+      maxCommands,
+      cwd: localExecEnabled ? String(localExec?.cwd || "") : "",
+      shell: localExecEnabled ? String(localExec?.shell || "") : "",
+      permissionProfile: localExecEnabled
+        ? {
+            mode: permissionProfile.mode,
+            allowCommands: normalizeStringArray(permissionProfile.allowCommands).slice(
+              0,
+              80
+            ),
+            denyPatterns: normalizeStringArray(permissionProfile.denyPatterns).slice(
+              0,
+              40
+            ),
+          }
+        : null,
+    },
+    commandHistory: Array.isArray(commandHistory)
+      ? commandHistory.map((item) => ({
+          step: item.step,
+          commands: item.commands,
+          results: item.results,
+        }))
+      : [],
+    request:
+      "현재 task를 수행한 결과를 작성하고, 다음 task가 바로 실행할 수 있도록 핵심 인사이트와 후속 액션을 정리하세요.",
+  };
+
+  return {
+    systemPrompt,
+    userPrompt: JSON.stringify(payload, null, 2),
+  };
+}
+
+async function requestWorkflowTaskResponseFromOpenAICodex({
+  accessToken,
+  accountId,
+  modelId,
+  systemPrompt,
+  userPrompt,
+}) {
+  const headers = buildOpenAICodexHeaders({
+    accessToken,
+    accountId,
+  });
+  const payload = {
+    model: modelId,
+    store: false,
+    stream: true,
+    instructions: systemPrompt,
+    input: [
+      {
+        role: "user",
+        content: [{ type: "input_text", text: userPrompt }],
+      },
+    ],
+    text: { verbosity: "medium" },
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+  };
+
+  if (typeof fetch !== "function") {
+    throw new Error("runtime fetch is unavailable");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DATA_AI_MODEL_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(resolveOpenAICodexResponsesUrl(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("OpenAI Codex request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    const rawText = await response.text().catch(() => "");
+    let payloadJson = {};
+    try {
+      payloadJson = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      payloadJson = {};
+    }
+    throw new Error(
+      sanitizeOpenAICodexErrorMessage(payloadJson, response.status, rawText)
+    );
+  }
+
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    const rawText = await response.text().catch(() => "");
+    let payloadJson = {};
+    try {
+      payloadJson = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      payloadJson = {};
+    }
+    const text =
+      extractModelTextFromResponsePayload(payloadJson) ||
+      extractTextFromCodexSseTranscript(rawText) ||
+      rawText.trim();
+    if (!text) {
+      throw new Error("model returned an empty response");
+    }
+    return text;
+  }
+
+  const text = await readOpenAICodexSseOutputText(response);
+  if (!text) {
+    throw new Error("model returned an empty response");
+  }
+  return text;
+}
+
+async function requestWorkflowTaskResponseFromOpenAIResponsesApi({
+  accessToken,
+  modelId,
+  systemPrompt,
+  userPrompt,
+}) {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "content-type": "application/json",
+  };
+
+  const responsesPayload = {
+    model: modelId,
+    input: [
+      {
+        role: "system",
+        content: [{ type: "input_text", text: systemPrompt }],
+      },
+      {
+        role: "user",
+        content: [{ type: "input_text", text: userPrompt }],
+      },
+    ],
+    max_output_tokens: 1800,
+  };
+
+  const responsesResult = await fetchJsonWithTimeout(
+    `${OPENAI_API_BASE_URL}/responses`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(responsesPayload),
+    },
+    DATA_AI_MODEL_TIMEOUT_MS
+  );
+
+  if (responsesResult.response.ok) {
+    const text = extractModelTextFromResponsePayload(responsesResult.payload);
+    if (!text) {
+      throw new Error("model returned an empty response");
+    }
+    return text;
+  }
+
+  const responsesErrorText = String(
+    responsesResult.payload?.error?.message ||
+      responsesResult.payload?.message ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+  const shouldFallbackToChatCompletions =
+    responsesResult.response.status === 400 ||
+    responsesResult.response.status === 403 ||
+    responsesResult.response.status === 404 ||
+    responsesResult.response.status === 422 ||
+    responsesErrorText.includes("api.responses.write");
+
+  if (!shouldFallbackToChatCompletions) {
+    throw new Error(
+      sanitizeModelErrorMessage(
+        responsesResult.payload,
+        responsesResult.response.status,
+        "OpenAI responses API request failed"
+      )
+    );
+  }
+
+  const chatPayload = {
+    model: modelId,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  };
+
+  const chatResult = await fetchJsonWithTimeout(
+    `${OPENAI_API_BASE_URL}/chat/completions`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(chatPayload),
+    },
+    DATA_AI_MODEL_TIMEOUT_MS
+  );
+
+  if (!chatResult.response.ok) {
+    throw new Error(
+      sanitizeModelErrorMessage(
+        chatResult.payload,
+        chatResult.response.status,
+        "OpenAI chat completion request failed"
+      )
+    );
+  }
+
+  const text = extractModelTextFromResponsePayload(chatResult.payload);
+  if (!text) {
+    throw new Error("model returned an empty response");
+  }
+  return text;
+}
+
+async function requestWorkflowTaskResponseFromOpenAI({
+  provider,
+  accessToken,
+  accountId,
+  modelId,
+  systemPrompt,
+  userPrompt,
+}) {
+  const normalizedProvider = normalizeProviderId(provider);
+  if (normalizedProvider === "openai-codex") {
+    return requestWorkflowTaskResponseFromOpenAICodex({
+      accessToken,
+      accountId,
+      modelId,
+      systemPrompt,
+      userPrompt,
+    });
+  }
+
+  return requestWorkflowTaskResponseFromOpenAIResponsesApi({
+    accessToken,
+    modelId,
+    systemPrompt,
+    userPrompt,
+  });
+}
+
+function isTaskLocalExecutionEnabled(task, agent) {
+  if (!WORKFLOW_LOCAL_EXEC_ENABLED || isServerlessRuntime) {
+    return false;
+  }
+
+  const input = task?.input && typeof task.input === "object" ? task.input : {};
+  if (typeof input.localExec === "boolean") {
+    return input.localExec;
+  }
+  if (typeof input.allowLocalExec === "boolean") {
+    return input.allowLocalExec;
+  }
+
+  const tools = normalizeStringArray(agent?.tools || []);
+  if (tools.length === 0) {
+    return true;
+  }
+
+  return tools.some((item) => {
+    const lower = String(item || "").trim().toLowerCase();
+    return (
+      lower === "shell" ||
+      lower === "terminal" ||
+      lower === "bash" ||
+      lower === "zsh" ||
+      lower === "local-exec" ||
+      lower === "computer-use" ||
+      lower.includes("shell") ||
+      lower.includes("terminal")
+    );
+  });
+}
+
+function compactCommandResultForModel(result) {
+  return {
+    command: truncateSingleLine(result?.command || "", 240),
+    ok: Boolean(result?.ok),
+    exitCode:
+      Number.isFinite(Number(result?.exitCode)) && result?.exitCode !== null
+        ? Number(result.exitCode)
+        : null,
+    timedOut: Boolean(result?.timedOut),
+    durationMs: Math.max(0, Number(result?.durationMs) || 0),
+    stdout: truncateSingleLine(result?.stdout || "", 1000),
+    stderr: truncateSingleLine(result?.stderr || "", 1000),
+  };
+}
+
+function summarizeCommandResultForEvent(result) {
+  const command = truncateSingleLine(result?.command || "", 120);
+  const ok = Boolean(result?.ok);
+  const exitCode =
+    Number.isFinite(Number(result?.exitCode)) && result?.exitCode !== null
+      ? Number(result.exitCode)
+      : null;
+  const durationMs = Math.max(0, Number(result?.durationMs) || 0);
+  const tail = ok
+    ? `exit=${exitCode === null ? "-" : exitCode}, ${durationMs}ms`
+    : `실패(exit=${exitCode === null ? "-" : exitCode}, ${durationMs}ms)`;
+  return `${command} -> ${tail}`;
+}
+
+function toSafePathSegment(value, fallback = "node") {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function resolveTaskNodeId(task, agentId = "") {
+  const input = task?.input && typeof task.input === "object" ? task.input : {};
+  const inputNodeId = String(input?.nodeId || input?.sessionNodeId || "").trim();
+  if (inputNodeId) {
+    return inputNodeId;
+  }
+  const taskKey = String(task?.taskKey || "").trim();
+  if (taskKey) {
+    return taskKey;
+  }
+  const fallbackAgentId = String(agentId || "").trim();
+  if (fallbackAgentId) {
+    return `agent-${fallbackAgentId.slice(0, 8)}`;
+  }
+  return "node";
+}
+
+function resolveTaskPermissionProfile(task) {
+  const input = task?.input && typeof task.input === "object" ? task.input : {};
+  const permissions =
+    input?.permissions && typeof input.permissions === "object"
+      ? input.permissions
+      : {};
+  const profileNameRaw = String(
+    input?.permissionProfile || permissions?.profile || permissions?.mode || ""
+  )
+    .trim()
+    .toLowerCase();
+  const profileName = ["read_only", "standard", "full", "custom"].includes(
+    profileNameRaw
+  )
+    ? profileNameRaw
+    : "standard";
+
+  const allowCommands = normalizeStringArray(
+    permissions?.allowCommands || input?.allowCommands || []
+  );
+  const denyPatterns = normalizeStringArray(
+    permissions?.denyPatterns || input?.denyPatterns || []
+  );
+
+  const profile = {
+    mode: profileName,
+    allowCommands,
+    denyPatterns,
+  };
+  return normalizePermissionProfile(profile);
+}
+
+function buildNodeSessionWorkDir(workflowId, nodeId) {
+  return path.join(
+    WORKFLOW_NODE_SESSION_ROOT,
+    toSafePathSegment(workflowId, "workflow"),
+    toSafePathSegment(nodeId, "node")
+  );
+}
+
+async function ensureWorkflowNodeSession({
+  workflowId,
+  task,
+  agentId,
+  teamIdentity = null,
+}) {
+  const workflowKey = String(workflowId || "").trim();
+  const nodeId = resolveTaskNodeId(task, agentId);
+  const workingDir = buildNodeSessionWorkDir(workflowKey, nodeId);
+  fs.mkdirSync(workingDir, { recursive: true });
+
+  const permissionProfile = resolveTaskPermissionProfile(task);
+  const existing =
+    typeof repository.getWorkflowNodeSession === "function"
+      ? await repository.getWorkflowNodeSession(workflowKey, nodeId)
+      : null;
+
+  const sessionPayload = {
+    workflowId: workflowKey,
+    nodeId,
+    agentId: agentId ? String(agentId).trim() : null,
+    sessionKey:
+      String(existing?.sessionKey || "").trim() || `${workflowKey}:${nodeId}`,
+    workingDir,
+    permissionProfile:
+      permissionProfile && typeof permissionProfile === "object"
+        ? permissionProfile
+        : existing?.permissionProfile && typeof existing.permissionProfile === "object"
+          ? existing.permissionProfile
+          : {},
+    memorySummary: String(existing?.memorySummary || "").trim(),
+    memoryTail: Array.isArray(existing?.memoryTail) ? existing.memoryTail : [],
+    meta:
+      existing?.meta && typeof existing.meta === "object"
+        ? {
+            ...existing.meta,
+            nodeId,
+            ...(teamIdentity && typeof teamIdentity === "object"
+              ? {
+                  teamName: String(teamIdentity.teamName || "").trim(),
+                  agentIdentity: {
+                    agentId: String(teamIdentity.agentId || "").trim(),
+                    agentName: String(teamIdentity.agentName || "").trim(),
+                    color: String(teamIdentity.color || "").trim(),
+                    role: String(teamIdentity.role || "").trim(),
+                  },
+                  color: String(teamIdentity.color || "").trim(),
+                  role: String(teamIdentity.role || "").trim(),
+                }
+              : {}),
+          }
+        : {
+            nodeId,
+            ...(teamIdentity && typeof teamIdentity === "object"
+              ? {
+                  teamName: String(teamIdentity.teamName || "").trim(),
+                  agentIdentity: {
+                    agentId: String(teamIdentity.agentId || "").trim(),
+                    agentName: String(teamIdentity.agentName || "").trim(),
+                    color: String(teamIdentity.color || "").trim(),
+                    role: String(teamIdentity.role || "").trim(),
+                  },
+                  color: String(teamIdentity.color || "").trim(),
+                  role: String(teamIdentity.role || "").trim(),
+                }
+              : {}),
+          },
+    lastUsedAt: new Date().toISOString(),
+  };
+
+  if (typeof repository.upsertWorkflowNodeSession === "function") {
+    const stored = await repository.upsertWorkflowNodeSession(sessionPayload);
+    if (stored) {
+      return stored;
+    }
+  }
+
+  return {
+    id: "",
+    workflowId: workflowKey,
+    nodeId,
+    agentId: agentId ? String(agentId).trim() : null,
+    sessionKey: sessionPayload.sessionKey,
+    workingDir,
+    permissionProfile: sessionPayload.permissionProfile,
+    memorySummary: sessionPayload.memorySummary,
+    memoryTail: sessionPayload.memoryTail,
+    meta: sessionPayload.meta,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastUsedAt: new Date().toISOString(),
+  };
+}
+
+function toPromptMemoryTail(memoryTail, maxItems = 8) {
+  const source = Array.isArray(memoryTail) ? memoryTail : [];
+  const safeMaxItems = Math.max(1, Number(maxItems) || 8);
+  return source
+    .slice(Math.max(0, source.length - safeMaxItems))
+    .map((item) => ({
+      at: String(item?.at || "").trim(),
+      taskKey: String(item?.taskKey || "").trim(),
+      title: String(item?.title || "").trim(),
+      model: String(item?.model || "").trim(),
+      status: String(item?.status || "").trim(),
+      summary: truncateSingleLine(item?.summary || "", 280),
+      insights: normalizeShortTextArray(item?.insights || [], {
+        maxItems: 4,
+        maxLength: 180,
+      }),
+      nextActions: normalizeShortTextArray(item?.nextActions || [], {
+        maxItems: 4,
+        maxLength: 180,
+      }),
+      commandStepCount: Math.max(0, Number(item?.commandStepCount) || 0),
+    }));
+}
+
+async function updateWorkflowNodeSessionMemory({
+  session,
+  task,
+  model,
+  parsed,
+  commandHistory,
+}) {
+  if (!session || typeof repository.upsertWorkflowNodeSession !== "function") {
+    return session;
+  }
+
+  const now = new Date().toISOString();
+  const existingTail = Array.isArray(session.memoryTail) ? session.memoryTail : [];
+  const memoryEntry = {
+    at: now,
+    taskId: String(task?.id || "").trim(),
+    taskKey: String(task?.taskKey || "").trim(),
+    title: String(task?.title || "").trim(),
+    model: String(model || "").trim(),
+    status: String(parsed?.status || "completed").trim(),
+    summary: truncateSingleLine(parsed?.summary || "", 320),
+    insights: normalizeShortTextArray(parsed?.insights || [], {
+      maxItems: 6,
+      maxLength: 200,
+    }),
+    nextActions: normalizeShortTextArray(parsed?.nextActions || [], {
+      maxItems: 6,
+      maxLength: 200,
+    }),
+    commandStepCount: Array.isArray(commandHistory) ? commandHistory.length : 0,
+  };
+  const memoryTail = [...existingTail, memoryEntry].slice(
+    Math.max(0, existingTail.length + 1 - WORKFLOW_NODE_MEMORY_TAIL_MAX)
+  );
+
+  const previousSummary = String(session.memorySummary || "").trim();
+  const nextSummaryLine = `${now.slice(0, 19)} ${memoryEntry.summary}`;
+  const mergedSummaryRaw = [previousSummary, nextSummaryLine]
+    .filter(Boolean)
+    .join("\n");
+  const mergedSummary =
+    mergedSummaryRaw.length > WORKFLOW_NODE_MEMORY_SUMMARY_MAX
+      ? mergedSummaryRaw.slice(
+          mergedSummaryRaw.length - WORKFLOW_NODE_MEMORY_SUMMARY_MAX
+        )
+      : mergedSummaryRaw;
+
+  const updated = await repository.upsertWorkflowNodeSession({
+    workflowId: session.workflowId,
+    nodeId: session.nodeId,
+    agentId: session.agentId,
+    sessionKey: session.sessionKey,
+    workingDir: session.workingDir,
+    permissionProfile:
+      session.permissionProfile && typeof session.permissionProfile === "object"
+        ? session.permissionProfile
+        : {},
+    memorySummary: mergedSummary,
+    memoryTail,
+    meta: session.meta && typeof session.meta === "object" ? session.meta : {},
+    lastUsedAt: now,
+  });
+  return updated || session;
+}
+
+function pickWorkflowTeamColor(index) {
+  const safe = Math.max(0, Number(index) || 0);
+  const palette = Array.isArray(WORKFLOW_TEAM_COLOR_PALETTE)
+    ? WORKFLOW_TEAM_COLOR_PALETTE
+    : [];
+  if (palette.length === 0) {
+    return "blue";
+  }
+  return String(palette[safe % palette.length] || "blue").trim() || "blue";
+}
+
+function resolveTaskNodeIdFromStoredTask(task) {
+  const input = task?.input && typeof task.input === "object" ? task.input : {};
+  const nodeId = String(input?.nodeId || task?.taskKey || "").trim();
+  return nodeId || String(task?.id || "").trim();
+}
+
+function buildWorkflowTaskKeyByNodeId(workflowTasks) {
+  const map = new Map();
+  for (const item of Array.isArray(workflowTasks) ? workflowTasks : []) {
+    const nodeId = resolveTaskNodeIdFromStoredTask(item);
+    const taskKey = String(item?.taskKey || "").trim();
+    if (!nodeId || !taskKey) {
+      continue;
+    }
+    if (!map.has(nodeId)) {
+      map.set(nodeId, taskKey);
+    }
+  }
+  return map;
+}
+
+function toPromptInboxMessages(messages = [], taskKeyByNodeId = new Map()) {
+  return (Array.isArray(messages) ? messages : [])
+    .slice(0, WORKFLOW_AGENT_INBOX_MAX_MESSAGES)
+    .map((message) => {
+      const fromNodeId = String(message?.fromNodeId || "").trim();
+      return {
+        id: String(message?.id || "").trim(),
+        fromNodeId,
+        fromTaskKey: String(
+          message?.fromTaskKey || taskKeyByNodeId.get(fromNodeId) || ""
+        ).trim(),
+        fromAgent: String(message?.fromAgent || "").trim(),
+        color: String(message?.color || "").trim(),
+        summary: truncateSingleLine(message?.summary || "", 200),
+        text: String(message?.text || "").trim().slice(0, 4000),
+        timestamp: String(message?.timestamp || "").trim(),
+        type: String(message?.type || "message").trim().toLowerCase() || "message",
+      };
+    });
+}
+
+function buildTeamIdentityForTask({
+  workflowId,
+  workflowTasks,
+  task,
+  nodeId,
+  agentLabel,
+}) {
+  const teamName = `workflow-${toSafePathSegment(String(workflowId || "").slice(0, 8), "team")}`;
+  const orderedTasks = Array.isArray(workflowTasks) ? workflowTasks : [];
+  const taskIndex = orderedTasks.findIndex((item) => String(item?.id || "").trim() === String(task?.id || "").trim());
+  const color = pickWorkflowTeamColor(taskIndex >= 0 ? taskIndex : 0);
+  const roots = orderedTasks.filter((item) => {
+    const deps = Array.isArray(item?.dependsOn) ? item.dependsOn : [];
+    return deps.length === 0;
+  });
+  const leaderTask = roots[0] || orderedTasks[0] || null;
+  const isLead =
+    leaderTask &&
+    String(leaderTask.id || "").trim() === String(task?.id || "").trim();
+  return {
+    teamName,
+    agentId: `${toSafePathSegment(nodeId, "node")}@${teamName}`,
+    agentName: String(agentLabel || nodeId || "agent").trim(),
+    color,
+    role: isLead ? "team-lead" : "teammate",
+    leaderTaskKey: String(leaderTask?.taskKey || "").trim(),
+    leaderNodeId: leaderTask ? resolveTaskNodeIdFromStoredTask(leaderTask) : "",
+  };
+}
+
+function resolveRecipientTaskKeys({
+  message,
+  workflowTasks,
+  senderTaskKey,
+}) {
+  const type = String(message?.type || "message").trim().toLowerCase();
+  if (type === "broadcast") {
+    return (Array.isArray(workflowTasks) ? workflowTasks : [])
+      .map((item) => String(item?.taskKey || "").trim())
+      .filter((item) => item && item !== senderTaskKey);
+  }
+  const recipientTaskKey = String(message?.recipientTaskKey || "").trim();
+  return recipientTaskKey ? [recipientTaskKey] : [];
+}
+
+async function dispatchWorkflowTeamMessages({
+  workflowId,
+  workflowTasks,
+  senderTask,
+  senderSession,
+  teamIdentity,
+  parsedMessages,
+}) {
+  if (!WORKFLOW_AGENT_TEAMS_ENABLED) {
+    return {
+      dispatchCount: 0,
+      deliveries: [],
+    };
+  }
+
+  const messages = normalizeTeamMessageArray(
+    parsedMessages,
+    WORKFLOW_AGENT_OUTBOX_MAX_MESSAGES
+  );
+  if (messages.length === 0) {
+    return {
+      dispatchCount: 0,
+      deliveries: [],
+    };
+  }
+
+  const taskByKey = new Map(
+    (Array.isArray(workflowTasks) ? workflowTasks : [])
+      .map((item) => [String(item?.taskKey || "").trim(), item])
+      .filter((entry) => entry[0])
+  );
+
+  const deliveries = [];
+  const senderTaskKey = String(senderTask?.taskKey || "").trim();
+  const senderNodeId = String(senderSession?.nodeId || "").trim();
+
+  for (const message of messages) {
+    const recipients = resolveRecipientTaskKeys({
+      message,
+      workflowTasks,
+      senderTaskKey,
+    });
+    for (const recipientTaskKey of recipients) {
+      const targetTask = taskByKey.get(recipientTaskKey);
+      if (!targetTask) {
+        continue;
+      }
+      const targetNodeId = resolveTaskNodeIdFromStoredTask(targetTask);
+      if (!targetNodeId || targetNodeId === senderNodeId) {
+        continue;
+      }
+      const summary =
+        truncateSingleLine(message.summary || "", 180) ||
+        truncateSingleLine(message.content || "", 180);
+      appendMailboxMessage({
+        rootDir: WORKFLOW_NODE_SESSION_ROOT,
+        workflowId,
+        nodeId: targetNodeId,
+        message: {
+          fromNodeId: senderNodeId,
+          fromTaskKey: senderTaskKey,
+          fromAgent: String(teamIdentity?.agentName || "").trim(),
+          fromAgentId: String(teamIdentity?.agentId || "").trim(),
+          color: String(teamIdentity?.color || "").trim(),
+          text: String(message.content || "").trim(),
+          summary,
+          type: String(message.type || "message").trim().toLowerCase(),
+          timestamp: new Date().toISOString(),
+        },
+      });
+      deliveries.push({
+        type: String(message.type || "message").trim().toLowerCase(),
+        recipientTaskKey,
+        recipientNodeId: targetNodeId,
+        content: truncateSingleLine(message.content || "", 220),
+        summary,
+      });
+    }
+  }
+
+  return {
+    dispatchCount: deliveries.length,
+    deliveries,
+  };
+}
+
+function toWorkflowNodeSessionSummary(session) {
+  if (!session) {
+    return null;
+  }
+  const permissionProfile = normalizePermissionProfile(
+    session.permissionProfile && typeof session.permissionProfile === "object"
+      ? session.permissionProfile
+      : {}
+  );
+  return {
+    nodeId: String(session.nodeId || "").trim(),
+    sessionKey: String(session.sessionKey || "").trim(),
+    workingDir: String(session.workingDir || "").trim(),
+    permissionProfile: {
+      mode: permissionProfile.mode,
+      allowCommands: normalizeStringArray(permissionProfile.allowCommands).slice(
+        0,
+        120
+      ),
+      denyPatterns: normalizeStringArray(permissionProfile.denyPatterns).slice(0, 60),
+    },
+    memorySummary: truncateSingleLine(session.memorySummary || "", 600),
+    memoryTailSize: Array.isArray(session.memoryTail) ? session.memoryTail.length : 0,
+    agentId: String(session?.meta?.agentIdentity?.agentId || "").trim() || null,
+    agentName: String(session?.meta?.agentIdentity?.agentName || "").trim() || null,
+    role: String(session?.meta?.role || "").trim() || null,
+    color: String(session?.meta?.color || "").trim() || null,
+    teamName: String(session?.meta?.teamName || "").trim() || null,
+    lastUsedAt: session.lastUsedAt || null,
+  };
+}
+
+async function executeWorkflowTaskWithAgent({
+  task,
+  workflowId,
+  taskTitle,
+  taskKind,
+  agent,
+  agentLabel,
+}) {
+  const workflow = await repository.getWorkflow(workflowId);
+  if (!workflow) {
+    throw new Error(`workflow not found: ${workflowId}`);
+  }
+  const taskAgentId = String(agent?.id || task?.agentId || "").trim();
+  const workflowTasks = await repository.listWorkflowTasks(workflowId);
+  const taskNodeId = resolveTaskNodeId(task, taskAgentId);
+  const taskKeyByNodeId = buildWorkflowTaskKeyByNodeId(workflowTasks);
+  const teamIdentity = buildTeamIdentityForTask({
+    workflowId,
+    workflowTasks,
+    task,
+    nodeId: taskNodeId,
+    agentLabel,
+  });
+  let nodeSession = await ensureWorkflowNodeSession({
+    workflowId,
+    task,
+    agentId: taskAgentId || null,
+    teamIdentity,
+  });
+  const sessionWorkingDir =
+    String(nodeSession?.workingDir || "").trim() || WORKFLOW_LOCAL_EXEC_CWD;
+  const sessionPermissionProfile = normalizePermissionProfile(
+    nodeSession?.permissionProfile && typeof nodeSession.permissionProfile === "object"
+      ? nodeSession.permissionProfile
+      : resolveTaskPermissionProfile(task)
+  );
+  let inboxMessages = [];
+  if (WORKFLOW_AGENT_TEAMS_ENABLED) {
+    const unread = readUnreadMailboxMessages({
+      rootDir: WORKFLOW_NODE_SESSION_ROOT,
+      workflowId,
+      nodeId: nodeSession.nodeId,
+      maxMessages: WORKFLOW_AGENT_INBOX_MAX_MESSAGES,
+    });
+    if (unread.length > 0) {
+      inboxMessages = toPromptInboxMessages(unread, taskKeyByNodeId);
+      markMailboxMessagesRead({
+        rootDir: WORKFLOW_NODE_SESSION_ROOT,
+        workflowId,
+        nodeId: nodeSession.nodeId,
+        messageIds: unread
+          .map((item) => String(item?.id || "").trim())
+          .filter(Boolean),
+      });
+      await repository.appendWorkflowEvent({
+        workflowId,
+        taskId: task?.id || null,
+        role: "agent",
+        message: `${agentLabel} inbox 수신: ${inboxMessages.length}건`,
+        meta: {
+          taskKey: task.taskKey,
+          inboxCount: inboxMessages.length,
+          role: teamIdentity.role,
+          color: teamIdentity.color,
+        },
+      });
+    }
+  }
+  const teamContext = {
+    enabled: WORKFLOW_AGENT_TEAMS_ENABLED,
+    teamName: teamIdentity.teamName,
+    self: {
+      agentId: teamIdentity.agentId,
+      agentName: teamIdentity.agentName,
+      nodeId: taskNodeId,
+      taskKey: String(task?.taskKey || "").trim(),
+      role: teamIdentity.role,
+      color: teamIdentity.color,
+    },
+    leader: {
+      taskKey: teamIdentity.leaderTaskKey,
+      nodeId: teamIdentity.leaderNodeId,
+    },
+    inboxMessages,
+  };
+  const commandHistory = [];
+
+  const dependencyIds = new Set(
+    (Array.isArray(task?.dependsOn) ? task.dependsOn : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  );
+  const dependencyOutputs = workflowTasks
+    .filter((item) => dependencyIds.has(String(item?.id || "").trim()))
+    .map((item) => {
+      const output =
+        item?.output && typeof item.output === "object" ? item.output : null;
+      const compactOutput = output
+        ? {
+            summary: truncateSingleLine(output.summary || "", 260),
+            insights: normalizeShortTextArray(output.insights, {
+              maxItems: 6,
+              maxLength: 180,
+            }),
+            nextActions: normalizeShortTextArray(output.nextActions, {
+              maxItems: 6,
+              maxLength: 180,
+            }),
+            status: String(output.status || "completed").trim() || "completed",
+            model: String(output.model || "").trim() || null,
+          }
+        : null;
+      return {
+        taskId: item.id,
+        taskKey: item.taskKey,
+        title: item.title,
+        status: item.status,
+        summary: truncateSingleLine(
+          compactOutput?.summary || item?.errorMessage || "",
+          260
+        ),
+        output: compactOutput,
+      };
+    });
+
+  const datasetContext = await buildWorkflowTaskDatasetContext(workflow, task);
+  const modelTier = String(agent?.modelTier || "").trim();
+  const parsedModel = parseModelSelectionValue(modelTier);
+  let modelProvider = parsedModel.provider;
+  const requestedModelId = String(parsedModel.modelId || "").trim();
+  const hasProviderPrefix = modelTier.includes("/");
+  if (!hasProviderPrefix && requestedModelId) {
+    const lowerModelId = requestedModelId.toLowerCase();
+    if (lowerModelId.includes("codex")) {
+      modelProvider = "openai-codex";
+    } else if (
+      lowerModelId.startsWith("gpt-") ||
+      lowerModelId.startsWith("o1") ||
+      lowerModelId.startsWith("o3") ||
+      lowerModelId.startsWith("o4")
+    ) {
+      modelProvider = "openai";
+    }
+  }
+  const isBalancedDefault =
+    modelTier.toLowerCase() === "balanced (default)".toLowerCase();
+
+  if (
+    !modelProvider ||
+    modelProvider === "system" ||
+    !requestedModelId ||
+    isBalancedDefault
+  ) {
+    const fallbackResult = {
+      taskKey: task.taskKey,
+      kind: taskKind,
+      agent: agentLabel,
+      model: "local/fallback",
+      modelAutoResolved: false,
+      status: "completed",
+      summary: `${agentLabel}가 '${taskTitle}' 작업을 처리했습니다. (모델 미설정으로 로컬 요약만 기록)`,
+      deliverable: `${agentLabel}는 현재 모델이 설정되지 않아 로컬 요약만 기록했습니다.`,
+      insights: normalizeShortTextArray(
+        [
+          workflow?.goal ? `workflow goal: ${workflow.goal}` : "",
+          datasetContext?.sourceName
+            ? `dataset: ${datasetContext.sourceName} (${datasetContext.rowCount} rows)`
+            : "dataset 미연결",
+        ].filter(Boolean),
+        { maxItems: 4, maxLength: 200 }
+      ),
+      nextActions: [],
+      messages: [],
+      messageDispatchCount: 0,
+      dependencyTaskKeys: dependencyOutputs
+        .map((item) => String(item.taskKey || "").trim())
+        .filter(Boolean),
+      usedFeatures: Array.isArray(datasetContext?.usedColumns)
+        ? datasetContext.usedColumns
+        : [],
+      completedAt: new Date().toISOString(),
+    };
+    nodeSession = await updateWorkflowNodeSessionMemory({
+      session: nodeSession,
+      task,
+      model: fallbackResult.model,
+      parsed: {
+        summary: fallbackResult.summary,
+        deliverable: fallbackResult.deliverable,
+        insights: fallbackResult.insights,
+        nextActions: fallbackResult.nextActions,
+        status: fallbackResult.status,
+      },
+      commandHistory,
+    });
+    return {
+      ...fallbackResult,
+      nodeSession: toWorkflowNodeSessionSummary(nodeSession),
+    };
+  }
+
+  if (!["openai", "openai-codex"].includes(modelProvider)) {
+    throw new Error(`unsupported task model provider: ${modelProvider}`);
+  }
+
+  const connection = await repository.getProviderAuthConnectionByProvider("openai");
+  if (!connection || connection.status !== "connected") {
+    throw new Error("OPEN AI provider OAuth 인증이 필요합니다.");
+  }
+  if (String(connection.authMode || "").trim().toLowerCase() !== "oauth") {
+    throw new Error("OPEN AI provider must use oauth auth mode");
+  }
+
+  const tokenResult = await ensureOpenAIOAuthAccessToken(connection);
+  const accessToken = tokenResult.accessToken;
+  const openAIOAuthAccountId = String(
+    tokenResult?.credential?.accountId ||
+      getOpenAICodexAccountId(accessToken) ||
+      ""
+  ).trim();
+
+  const useCodexTransport = modelProvider === "openai-codex";
+  const codexDiscoveredModelIds = normalizeProviderModels("openai", connection?.models)
+    .filter((entry) => entry.provider === "openai-codex")
+    .map((entry) => entry.modelId);
+
+  let availableOpenAIModelIds = [];
+  if (!useCodexTransport) {
+    try {
+      availableOpenAIModelIds = await fetchOpenAIAvailableModelIds(accessToken);
+    } catch {
+      availableOpenAIModelIds = [];
+    }
+  }
+
+  const modelResolution = useCodexTransport
+    ? {
+        modelId:
+          buildOpenAICodexFallbackModelIds(
+            requestedModelId,
+            codexDiscoveredModelIds
+          )[0] || requestedModelId,
+        changed: false,
+      }
+    : resolveRequestedOpenAIModel({
+        requestedModelId,
+        availableModelIds: availableOpenAIModelIds,
+      });
+
+  let modelIdForExecution = String(
+    modelResolution.modelId || requestedModelId
+  ).trim();
+  let modelAutoResolved =
+    modelIdForExecution !== requestedModelId || Boolean(modelResolution.changed);
+
+  const executionProvider = useCodexTransport ? "openai-codex" : "openai";
+  const localExecEnabled = isTaskLocalExecutionEnabled(task, agent);
+  const localExecConfig = {
+    enabled: localExecEnabled,
+    maxCommands: WORKFLOW_LOCAL_EXEC_MAX_COMMANDS,
+    cwd: sessionWorkingDir,
+    shell: WORKFLOW_LOCAL_EXEC_SHELL,
+    permissionProfile: sessionPermissionProfile,
+  };
+  const maxSteps = Math.max(1, WORKFLOW_LOCAL_EXEC_MAX_STEPS);
+
+  const requestModelOnce = async (prompts) => {
+    try {
+      return await requestWorkflowTaskResponseFromOpenAI({
+        provider: executionProvider,
+        accessToken,
+        accountId: openAIOAuthAccountId,
+        modelId: modelIdForExecution,
+        systemPrompt: prompts.systemPrompt,
+        userPrompt: prompts.userPrompt,
+      });
+    } catch (error) {
+      const firstMessage = truncateSingleLine(
+        String(error?.message || "task model execution failed"),
+        240
+      );
+      const lower = firstMessage.toLowerCase();
+      const isModelAccessError =
+        lower.includes("does not exist") ||
+        lower.includes("do not have access to it") ||
+        (lower.includes("model") && lower.includes("not found"));
+
+      if (!isModelAccessError) {
+        throw new Error(firstMessage);
+      }
+
+      const retryModel = useCodexTransport
+        ? buildOpenAICodexFallbackModelIds(
+            modelIdForExecution,
+            codexDiscoveredModelIds
+          ).find((candidate) => candidate !== modelIdForExecution) || ""
+        : pickPreferredOpenAIModel(availableOpenAIModelIds);
+
+      if (!retryModel || retryModel === modelIdForExecution) {
+        throw new Error(firstMessage);
+      }
+
+      const retryText = await requestWorkflowTaskResponseFromOpenAI({
+        provider: executionProvider,
+        accessToken,
+        accountId: openAIOAuthAccountId,
+        modelId: retryModel,
+        systemPrompt: prompts.systemPrompt,
+        userPrompt: prompts.userPrompt,
+      });
+      modelIdForExecution = retryModel;
+      modelAutoResolved = true;
+      return retryText;
+    }
+  };
+
+  let parsed = null;
+  for (let step = 1; step <= maxSteps; step += 1) {
+    const prompts = buildWorkflowTaskPromptPayload({
+      workflow,
+      task,
+      agent,
+      agentLabel,
+      taskTitle,
+      taskKind,
+      dependencyOutputs,
+      datasetContext,
+      localExec: localExecConfig,
+      commandHistory,
+      nodeSession,
+      teamContext,
+    });
+    const modelText = await requestModelOnce(prompts);
+    const nextParsed = parseWorkflowTaskModelOutput(modelText);
+    const requestedCommands = normalizeCommandList(
+      nextParsed.commands || [],
+      WORKFLOW_LOCAL_EXEC_MAX_COMMANDS
+    );
+
+    if (!localExecEnabled && requestedCommands.length > 0) {
+      parsed = {
+        ...nextParsed,
+        status: "blocked",
+        commands: [],
+        insights: normalizeShortTextArray(
+          [
+            ...(Array.isArray(nextParsed.insights) ? nextParsed.insights : []),
+            "로컬 명령 실행이 비활성화되어 commands를 실행할 수 없습니다.",
+          ],
+          { maxItems: 12, maxLength: 220 }
+        ),
+      };
+      break;
+    }
+
+    if (nextParsed.status !== "needs_commands" || requestedCommands.length === 0) {
+      parsed = {
+        ...nextParsed,
+        commands: requestedCommands,
+      };
+      break;
+    }
+
+    await repository.appendWorkflowEvent({
+      workflowId,
+      taskId: task?.id || null,
+      role: "agent",
+      message: `${agentLabel} 명령 실행 요청: ${requestedCommands.length}개`,
+      meta: {
+        step,
+        commandCount: requestedCommands.length,
+      },
+    });
+
+    const commandRun = await runLocalCommands({
+      commands: requestedCommands,
+      cwd: localExecConfig.cwd,
+      shell: localExecConfig.shell,
+      timeoutMs: WORKFLOW_LOCAL_EXEC_TIMEOUT_MS,
+      maxOutputChars: WORKFLOW_LOCAL_EXEC_OUTPUT_MAX_CHARS,
+      maxCommands: WORKFLOW_LOCAL_EXEC_MAX_COMMANDS,
+      permissionProfile: localExecConfig.permissionProfile,
+    });
+
+    const compactResults = (Array.isArray(commandRun.results) ? commandRun.results : []).map(
+      (item) => compactCommandResultForModel(item)
+    );
+    commandHistory.push({
+      step,
+      commands: requestedCommands,
+      results: compactResults,
+      successCount: commandRun.successCount,
+      failedCount: commandRun.failedCount,
+    });
+
+    for (const result of compactResults.slice(0, 8)) {
+      await repository.appendWorkflowEvent({
+        workflowId,
+        taskId: task?.id || null,
+        role: "agent",
+        message: `${agentLabel} 명령 결과: ${summarizeCommandResultForEvent(result)}`,
+        meta: {
+          step,
+          ok: Boolean(result.ok),
+          exitCode: result.exitCode,
+          command: result.command,
+        },
+      });
+    }
+
+    if (step >= maxSteps) {
+      parsed = {
+        ...nextParsed,
+        status: commandRun.failedCount > 0 ? "blocked" : "completed",
+        commands: [],
+        insights: normalizeShortTextArray(
+          [
+            ...(Array.isArray(nextParsed.insights) ? nextParsed.insights : []),
+            `명령 실행 ${commandRun.commandCount}개 완료 (성공 ${commandRun.successCount}, 실패 ${commandRun.failedCount})`,
+          ],
+          { maxItems: 12, maxLength: 220 }
+        ),
+      };
+      break;
+    }
+  }
+
+  if (!parsed) {
+    parsed = {
+      summary: `${agentLabel}가 '${taskTitle}' 작업을 완료했습니다.`,
+      deliverable: "",
+      insights: [],
+      nextActions: [],
+      commands: [],
+      messages: [],
+      status: "completed",
+      rawText: "",
+    };
+  }
+
+  const teamMessageDispatch = await dispatchWorkflowTeamMessages({
+    workflowId,
+    workflowTasks,
+    senderTask: task,
+    senderSession: nodeSession,
+    teamIdentity,
+    parsedMessages: parsed.messages,
+  });
+  for (const delivery of teamMessageDispatch.deliveries.slice(0, 24)) {
+    await repository.appendWorkflowEvent({
+      workflowId,
+      taskId: task?.id || null,
+      role: "agent",
+      message: `${agentLabel} 메시지 → ${delivery.recipientTaskKey}: ${delivery.summary}`,
+      meta: {
+        taskKey: task.taskKey,
+        type: "team_message",
+        messageType: delivery.type,
+        recipientTaskKey: delivery.recipientTaskKey,
+        recipientNodeId: delivery.recipientNodeId,
+      },
+    });
+  }
+
+  const result = {
+    taskKey: task.taskKey,
+    kind: taskKind,
+    agent: agentLabel,
+    model: `${executionProvider}/${modelIdForExecution}`,
+    modelAutoResolved,
+    status: parsed.status,
+    summary:
+      parsed.summary ||
+      `${agentLabel}가 '${taskTitle}' 작업을 완료했습니다.`,
+    deliverable: String(parsed.deliverable || "").trim(),
+    insights: parsed.insights,
+    nextActions: parsed.nextActions,
+    messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+    messageDispatchCount: teamMessageDispatch.dispatchCount,
+    messageDeliveries: teamMessageDispatch.deliveries,
+    commandRuns: commandHistory,
+    commandExecutionEnabled: localExecEnabled,
+    dependencyTaskKeys: dependencyOutputs
+      .map((item) => String(item.taskKey || "").trim())
+      .filter(Boolean),
+    usedFeatures: Array.isArray(datasetContext?.usedColumns)
+      ? datasetContext.usedColumns
+      : [],
+    rawResponse: parsed.rawText,
+    completedAt: new Date().toISOString(),
+  };
+  nodeSession = await updateWorkflowNodeSessionMemory({
+    session: nodeSession,
+    task,
+    model: result.model,
+    parsed,
+    commandHistory,
+  });
+  return {
+    ...result,
+    nodeSession: toWorkflowNodeSessionSummary(nodeSession),
+  };
+}
+
 function toDataRunResponse(run, { includeRows = false } = {}) {
   if (!run) {
     return null;
@@ -3232,7 +5016,10 @@ function canAccessDataRun(run, authUser) {
   return String(run.userId || "").trim() === String(authUser.id || "").trim();
 }
 
-function toWorkflowApiResponse(workflow, { tasks = [], events = [] } = {}) {
+function toWorkflowApiResponse(
+  workflow,
+  { tasks = [], events = [], nodeSessions = [] } = {}
+) {
   if (!workflow) {
     return null;
   }
@@ -3255,6 +5042,7 @@ function toWorkflowApiResponse(workflow, { tasks = [], events = [] } = {}) {
     taskCounts: summarizeWorkflowTaskCounts(tasks),
     tasks,
     events,
+    nodeSessions: Array.isArray(nodeSessions) ? nodeSessions : [],
   };
 }
 
@@ -4826,13 +6614,22 @@ app.get("/api/workflows/:workflowId", authenticate, async (req, res, next) => {
     }
 
     const eventLimit = toPositiveInt(req.query.eventLimit, 200);
-    const [tasks, events] = await Promise.all([
+    const loadNodeSessions =
+      typeof repository.listWorkflowNodeSessions === "function"
+        ? repository.listWorkflowNodeSessions(workflowId)
+        : Promise.resolve([]);
+    const [tasks, events, nodeSessions] = await Promise.all([
       repository.listWorkflowTasks(workflowId),
       repository.listWorkflowEvents(workflowId, eventLimit),
+      loadNodeSessions,
     ]);
 
     return res.json({
-      workflow: toWorkflowApiResponse(workflow, { tasks, events }),
+      workflow: toWorkflowApiResponse(workflow, {
+        tasks,
+        events,
+        nodeSessions,
+      }),
     });
   } catch (error) {
     return next(error);
@@ -4876,6 +6673,27 @@ app.get("/api/workflows/:workflowId/events", authenticate, async (req, res, next
     const limit = toPositiveInt(req.query.limit, 200);
     const events = await repository.listWorkflowEvents(workflowId, limit);
     return res.json({ events });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/workflows/:workflowId/sessions", authenticate, async (req, res, next) => {
+  try {
+    await flushWorkflowSchedulerForServerless();
+    const workflowId = String(req.params.workflowId || "").trim();
+    const workflow = await repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return res.status(404).json({
+        error: "workflow_not_found",
+        message: `workflow not found: ${workflowId}`,
+      });
+    }
+    const nodeSessions =
+      typeof repository.listWorkflowNodeSessions === "function"
+        ? await repository.listWorkflowNodeSessions(workflowId)
+        : [];
+    return res.json({ nodeSessions });
   } catch (error) {
     return next(error);
   }
@@ -4955,16 +6773,22 @@ app.post("/api/workflows", ...requireOperatorRole, async (req, res) => {
       await workflowScheduler.processTick();
     }
 
-    const [storedWorkflow, storedTasks, storedEvents] = await Promise.all([
+    const loadNodeSessions =
+      typeof repository.listWorkflowNodeSessions === "function"
+        ? repository.listWorkflowNodeSessions(workflow.id)
+        : Promise.resolve([]);
+    const [storedWorkflow, storedTasks, storedEvents, nodeSessions] = await Promise.all([
       repository.getWorkflow(workflow.id),
       repository.listWorkflowTasks(workflow.id),
       repository.listWorkflowEvents(workflow.id, 200),
+      loadNodeSessions,
     ]);
 
     return res.status(201).json({
       workflow: toWorkflowApiResponse(storedWorkflow || workflow, {
         tasks: storedTasks,
         events: storedEvents,
+        nodeSessions,
       }),
     });
   } catch (error) {
@@ -4989,16 +6813,22 @@ app.post("/api/workflows/:workflowId/tick", ...requireOperatorRole, async (req, 
     await workflowScheduler.processTick();
     await repository.reconcileWorkflowStatus(workflowId);
 
-    const [updatedWorkflow, tasks, events] = await Promise.all([
+    const loadNodeSessions =
+      typeof repository.listWorkflowNodeSessions === "function"
+        ? repository.listWorkflowNodeSessions(workflowId)
+        : Promise.resolve([]);
+    const [updatedWorkflow, tasks, events, nodeSessions] = await Promise.all([
       repository.getWorkflow(workflowId),
       repository.listWorkflowTasks(workflowId),
       repository.listWorkflowEvents(workflowId, 200),
+      loadNodeSessions,
     ]);
 
     return res.json({
       workflow: toWorkflowApiResponse(updatedWorkflow || workflow, {
         tasks,
         events,
+        nodeSessions,
       }),
     });
   } catch (error) {
