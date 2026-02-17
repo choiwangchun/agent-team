@@ -3691,6 +3691,8 @@ function buildWorkflowTaskPromptPayload({
     "deliverable must be concrete and usable immediately, not a placeholder sentence.",
     "insights: array of key findings for this task.",
     "nextActions: array of concrete handoff items for downstream tasks.",
+    "If task.input.instruction is provided, treat it as the primary task objective.",
+    "If task.input.handoff exists, read it and continue work from that handoff context.",
     "status: completed, blocked, or needs_commands.",
     localExecEnabled
       ? `commands: optional array of shell commands (max ${maxCommands}) when local execution is required.`
@@ -7084,6 +7086,59 @@ app.get("/api/jobs/:jobId", async (req, res, next) => {
 
     return res.json({
       job: summarizeJob(job),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/workflows/:workflowId/stop", ...requireOperatorRole, async (req, res, next) => {
+  try {
+    const workflowId = String(req.params.workflowId || "").trim();
+    const workflow = await repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return res.status(404).json({
+        error: "workflow_not_found",
+        message: `workflow not found: ${workflowId}`,
+      });
+    }
+
+    const reason = String(req.body?.reason || "workflow_stopped_by_user").trim();
+    if (typeof repository.cancelWorkflow === "function") {
+      await repository.cancelWorkflow(workflowId, reason);
+    } else {
+      return res.status(501).json({
+        error: "workflow_stop_not_supported",
+        message: "workflow stop is not supported by current repository",
+      });
+    }
+
+    await repository.appendWorkflowEvent({
+      workflowId,
+      role: "system",
+      message: `workflow stopped by user`,
+      meta: {
+        reason,
+      },
+    });
+
+    const loadNodeSessions =
+      typeof repository.listWorkflowNodeSessions === "function"
+        ? repository.listWorkflowNodeSessions(workflowId)
+        : Promise.resolve([]);
+    const [updatedWorkflow, tasks, events, nodeSessions] = await Promise.all([
+      repository.getWorkflow(workflowId),
+      repository.listWorkflowTasks(workflowId),
+      repository.listWorkflowEvents(workflowId, 200),
+      loadNodeSessions,
+    ]);
+
+    return res.json({
+      workflow: toWorkflowApiResponse(updatedWorkflow || workflow, {
+        tasks,
+        events,
+        nodeSessions,
+      }),
     });
   } catch (error) {
     return next(error);

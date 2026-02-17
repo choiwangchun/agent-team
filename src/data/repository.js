@@ -179,6 +179,33 @@ function toWorkflowTaskResponse(row) {
   };
 }
 
+function normalizeStringArray(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return [...new Set(input.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function getTaskInputObject(task) {
+  return task?.input && typeof task.input === "object" && !Array.isArray(task.input)
+    ? task.input
+    : {};
+}
+
+function getTaskQueueOwnerKey(task) {
+  const input = getTaskInputObject(task);
+  const nodeId = String(input?.nodeId || "").trim();
+  if (nodeId) {
+    return `node:${nodeId}`;
+  }
+  const agentId = String(task?.agentId || "").trim();
+  if (agentId) {
+    return `agent:${agentId}`;
+  }
+  const taskKey = String(task?.taskKey || "").trim();
+  return `task:${taskKey || String(task?.id || "").trim()}`;
+}
+
 function toWorkflowEventResponse(row) {
   if (!row) {
     return null;
@@ -1109,6 +1136,117 @@ class InMemoryRepository {
     return task ? deepClone(task) : null;
   }
 
+  async enqueueWorkflowTask({
+    workflowId,
+    agentId = null,
+    taskKey,
+    title,
+    kind = "handoff",
+    dependsOnTaskIds = [],
+    input = {},
+  }) {
+    const workflowKey = String(workflowId || "").trim();
+    if (!workflowKey) {
+      throw new Error("workflowId is required");
+    }
+    const workflow = this.workflows.get(workflowKey);
+    if (!workflow) {
+      throw new Error(`workflow not found: ${workflowKey}`);
+    }
+    if (!["pending", "running"].includes(String(workflow.status || "").trim())) {
+      throw new Error(`workflow is not enqueueable: ${workflow.status}`);
+    }
+
+    const nextTaskKey = String(taskKey || "").trim();
+    if (!nextTaskKey) {
+      throw new Error("taskKey is required");
+    }
+
+    const duplicated = Array.from(this.workflowTasks.values()).some((task) => {
+      return (
+        String(task?.workflowId || "").trim() === workflowKey &&
+        String(task?.taskKey || "").trim() === nextTaskKey
+      );
+    });
+    if (duplicated) {
+      throw new Error(`duplicate workflow task key: ${nextTaskKey}`);
+    }
+
+    const dependencyIds = normalizeStringArray(dependsOnTaskIds);
+    const dependsOn = [];
+    for (const dependencyId of dependencyIds) {
+      const dependency = this.workflowTasks.get(dependencyId);
+      if (!dependency) {
+        continue;
+      }
+      if (String(dependency.workflowId || "").trim() !== workflowKey) {
+        continue;
+      }
+      dependsOn.push(dependencyId);
+    }
+
+    const now = new Date().toISOString();
+    const record = {
+      id: crypto.randomUUID(),
+      workflowId: workflowKey,
+      agentId: agentId ? String(agentId).trim() : null,
+      taskKey: nextTaskKey,
+      title: String(title || nextTaskKey).trim() || nextTaskKey,
+      kind: String(kind || "handoff").trim() || "handoff",
+      status: "pending",
+      dependsOn: [...new Set(dependsOn)],
+      input: input && typeof input === "object" && !Array.isArray(input) ? deepClone(input) : {},
+      output: null,
+      attempts: 0,
+      errorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      completedAt: null,
+    };
+
+    this.workflowTasks.set(record.id, record);
+    workflow.updatedAt = now;
+    this.workflows.set(workflow.id, workflow);
+    this.persistState();
+    return deepClone(record);
+  }
+
+  async cancelWorkflow(workflowId, reason = "workflow_stopped_by_user") {
+    const workflowKey = String(workflowId || "").trim();
+    const workflow = this.workflows.get(workflowKey);
+    if (!workflow) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    workflow.status = "cancelled";
+    workflow.errorMessage = String(reason || "workflow_stopped_by_user").trim();
+    workflow.updatedAt = now;
+    workflow.completedAt = workflow.completedAt || now;
+    this.workflows.set(workflowKey, workflow);
+
+    for (const [taskId, task] of this.workflowTasks.entries()) {
+      if (String(task?.workflowId || "").trim() !== workflowKey) {
+        continue;
+      }
+      if (!["pending", "running"].includes(String(task?.status || "").trim())) {
+        continue;
+      }
+      const next = {
+        ...task,
+        status: "failed",
+        errorMessage: String(reason || "workflow_stopped_by_user").trim(),
+        updatedAt: now,
+        completedAt: task.completedAt || now,
+      };
+      this.workflowTasks.set(taskId, next);
+    }
+
+    this.persistState();
+    return deepClone(workflow);
+  }
+
   async appendWorkflowEvent({
     workflowId,
     taskId = null,
@@ -1248,6 +1386,18 @@ class InMemoryRepository {
         continue;
       }
 
+      const ownerKey = getTaskQueueOwnerKey(task);
+      const hasRunningOwnerTask = Array.from(this.workflowTasks.values()).some(
+        (item) =>
+          String(item?.workflowId || "").trim() === String(task.workflowId || "").trim() &&
+          String(item?.status || "").trim() === "running" &&
+          String(item?.id || "").trim() !== String(task.id || "").trim() &&
+          getTaskQueueOwnerKey(item) === ownerKey
+      );
+      if (hasRunningOwnerTask) {
+        continue;
+      }
+
       task.status = "running";
       task.startedAt = task.startedAt || new Date().toISOString();
       task.updatedAt = new Date().toISOString();
@@ -1273,6 +1423,9 @@ class InMemoryRepository {
     const task = this.workflowTasks.get(key);
     if (!task) {
       return null;
+    }
+    if (String(task.status || "").trim() !== "running") {
+      return deepClone(task);
     }
 
     task.status = "completed";
@@ -1313,6 +1466,9 @@ class InMemoryRepository {
     const workflow = this.workflows.get(key);
     if (!workflow) {
       return null;
+    }
+    if (String(workflow.status || "").trim().toLowerCase() === "cancelled") {
+      return deepClone(workflow);
     }
 
     const tasks = Array.from(this.workflowTasks.values()).filter(
@@ -2775,6 +2931,147 @@ class PostgresRepository {
     return rows.length > 0 ? toWorkflowTaskResponse(rows[0]) : null;
   }
 
+  async enqueueWorkflowTask({
+    workflowId,
+    agentId = null,
+    taskKey,
+    title,
+    kind = "handoff",
+    dependsOnTaskIds = [],
+    input = {},
+  }) {
+    const workflowKey = String(workflowId || "").trim();
+    if (!workflowKey) {
+      throw new Error("workflowId is required");
+    }
+
+    const workflow = await this.getWorkflow(workflowKey);
+    if (!workflow) {
+      throw new Error(`workflow not found: ${workflowKey}`);
+    }
+    if (!["pending", "running"].includes(String(workflow.status || "").trim())) {
+      throw new Error(`workflow is not enqueueable: ${workflow.status}`);
+    }
+
+    const nextTaskKey = String(taskKey || "").trim();
+    if (!nextTaskKey) {
+      throw new Error("taskKey is required");
+    }
+
+    const dependencyIds = normalizeStringArray(dependsOnTaskIds);
+    const validDependencyIds = [];
+    if (dependencyIds.length > 0) {
+      const { rows: dependencyRows } = await this.pool.query(
+        `
+        SELECT id
+        FROM workflow_tasks
+        WHERE workflow_id = $1
+          AND id = ANY($2::text[])
+        `,
+        [workflowKey, dependencyIds]
+      );
+      validDependencyIds.push(
+        ...dependencyRows.map((row) => String(row?.id || "").trim()).filter(Boolean)
+      );
+    }
+
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO workflow_tasks (
+        id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+        attempts, error_message, created_at, updated_at, started_at, completed_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, 'pending', $7::jsonb, $8::jsonb, NULL,
+        0, NULL, $9::timestamptz, $9::timestamptz, NULL, NULL
+      )
+      RETURNING id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
+                attempts, error_message, created_at, updated_at, started_at, completed_at
+      `,
+      [
+        id,
+        workflowKey,
+        agentId ? String(agentId).trim() : null,
+        nextTaskKey,
+        String(title || nextTaskKey).trim() || nextTaskKey,
+        String(kind || "handoff").trim() || "handoff",
+        JSON.stringify([...new Set(validDependencyIds)]),
+        JSON.stringify(
+          input && typeof input === "object" && !Array.isArray(input) ? input : {}
+        ),
+        createdAt,
+      ]
+    );
+
+    await this.pool.query(
+      `
+      UPDATE workflows
+      SET updated_at = NOW()
+      WHERE id = $1
+      `,
+      [workflowKey]
+    );
+
+    return rows.length > 0 ? toWorkflowTaskResponse(rows[0]) : null;
+  }
+
+  async cancelWorkflow(workflowId, reason = "workflow_stopped_by_user") {
+    const workflowKey = String(workflowId || "").trim();
+    if (!workflowKey) {
+      return null;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const cancelReason = String(reason || "workflow_stopped_by_user").trim();
+      const workflowResult = await client.query(
+        `
+        UPDATE workflows
+        SET
+          status = 'cancelled',
+          error_message = $2,
+          completed_at = COALESCE(completed_at, NOW()),
+          updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, goal, status, dataset_id, selected_features_json, created_by, meta_json,
+                  error_message, created_at, updated_at, started_at, completed_at
+        `,
+        [workflowKey, cancelReason]
+      );
+
+      if (workflowResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      await client.query(
+        `
+        UPDATE workflow_tasks
+        SET
+          status = 'failed',
+          error_message = $2,
+          completed_at = COALESCE(completed_at, NOW()),
+          updated_at = NOW()
+        WHERE workflow_id = $1
+          AND status IN ('pending', 'running')
+        `,
+        [workflowKey, cancelReason]
+      );
+
+      await client.query("COMMIT");
+      return toWorkflowResponse(workflowResult.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async appendWorkflowEvent({
     workflowId,
     taskId = null,
@@ -2979,6 +3276,15 @@ class PostgresRepository {
             JOIN workflow_tasks d ON d.id = dep.dep_task_id
             WHERE d.status <> 'completed'
           )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM workflow_tasks r
+            WHERE r.workflow_id = t.workflow_id
+              AND r.status = 'running'
+              AND r.id <> t.id
+              AND COALESCE(NULLIF(r.input_json->>'nodeId', ''), NULLIF(r.agent_id, ''), r.task_key) =
+                  COALESCE(NULLIF(t.input_json->>'nodeId', ''), NULLIF(t.agent_id, ''), t.task_key)
+          )
         ORDER BY t.created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -3045,6 +3351,7 @@ class PostgresRepository {
         completed_at = NOW(),
         updated_at = NOW()
       WHERE id = $1
+        AND status = 'running'
       RETURNING id, workflow_id, agent_id, task_key, title, kind, status, depends_on_json, input_json, output_json,
                 attempts, error_message, created_at, updated_at, started_at, completed_at
       `,
@@ -3089,6 +3396,14 @@ class PostgresRepository {
 
   async reconcileWorkflowStatus(workflowId) {
     const key = String(workflowId || "").trim();
+    const current = await this.getWorkflow(key);
+    if (!current) {
+      return null;
+    }
+    if (String(current.status || "").trim().toLowerCase() === "cancelled") {
+      return current;
+    }
+
     const { rows } = await this.pool.query(
       `
       SELECT

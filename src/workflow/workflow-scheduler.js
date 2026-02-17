@@ -1,3 +1,29 @@
+function normalizeStringArray(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return [...new Set(input.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function getTaskInput(task) {
+  return task?.input && typeof task.input === "object" && !Array.isArray(task.input)
+    ? task.input
+    : {};
+}
+
+function resolveTaskNodeId(task) {
+  const input = getTaskInput(task);
+  const nodeId = String(input?.nodeId || "").trim();
+  if (nodeId) {
+    return nodeId;
+  }
+  return String(task?.taskKey || "").trim();
+}
+
+function randomShortId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 class WorkflowScheduler {
   constructor({
     repository,
@@ -161,12 +187,35 @@ class WorkflowScheduler {
         0,
         Number(output?.messageDispatchCount) || 0
       );
-      await this.repository.completeWorkflowTask(task.id, output);
+      const completedTask = await this.repository.completeWorkflowTask(task.id, output);
+      if (!completedTask || String(completedTask.status || "").trim() !== "completed") {
+        await this.repository.appendWorkflowEvent({
+          workflowId,
+          taskId: task.id,
+          role: "system",
+          message: `${agentLabel} 결과 무시: ${taskTitle} (workflow가 이미 중단되었거나 상태가 변경됨)`,
+          meta: {
+            taskKey: task.taskKey,
+            kind: taskKind,
+            skipped: true,
+          },
+        });
+        return;
+      }
+
+      const handoffCount =
+        outputStatus === "completed"
+          ? await this.enqueueAutoHandoffs({
+              workflowId,
+              task: completedTask,
+              output,
+            })
+          : 0;
       await this.repository.appendWorkflowEvent({
         workflowId,
         taskId: task.id,
         role: "agent",
-        message: `${agentLabel} 완료: ${taskTitle} [model:${modelUsed}]${commandStepCount > 0 ? ` [cmd:${commandStepCount}]` : ""}${messageDispatchCount > 0 ? ` [msg:${messageDispatchCount}]` : ""}${output.summary ? ` · ${output.summary}` : ""}`,
+        message: `${agentLabel} 완료: ${taskTitle} [model:${modelUsed}]${commandStepCount > 0 ? ` [cmd:${commandStepCount}]` : ""}${messageDispatchCount > 0 ? ` [msg:${messageDispatchCount}]` : ""}${handoffCount > 0 ? ` [handoff:${handoffCount}]` : ""}${output.summary ? ` · ${output.summary}` : ""}`,
         meta: {
           taskKey: task.taskKey,
           kind: taskKind,
@@ -174,6 +223,7 @@ class WorkflowScheduler {
           status: outputStatus || "completed",
           commandStepCount,
           messageDispatchCount,
+          handoffCount,
         },
       });
     } catch (error) {
@@ -193,6 +243,133 @@ class WorkflowScheduler {
     } finally {
       await this.repository.reconcileWorkflowStatus(workflowId);
     }
+  }
+
+  getHandoffTargetsFromTask(task) {
+    const input = getTaskInput(task);
+    return normalizeStringArray(
+      input?.handoffTargets || input?.handoffNodeIds || input?.nextNodeIds
+    );
+  }
+
+  buildNodeTemplateMap(workflowTasks) {
+    const ordered = Array.isArray(workflowTasks) ? workflowTasks : [];
+    const byNodeId = new Map();
+    for (const item of ordered) {
+      const nodeId = resolveTaskNodeId(item);
+      if (!nodeId || byNodeId.has(nodeId)) {
+        continue;
+      }
+      byNodeId.set(nodeId, item);
+    }
+    return byNodeId;
+  }
+
+  buildHandoffInput({
+    sourceTask,
+    output,
+    targetTemplate,
+    targetNodeId,
+  }) {
+    const targetInput = getTaskInput(targetTemplate);
+    return {
+      ...targetInput,
+      nodeId: targetNodeId,
+      trigger: "handoff",
+      handoff: {
+        fromTaskId: String(sourceTask?.id || "").trim(),
+        fromTaskKey: String(sourceTask?.taskKey || "").trim(),
+        fromTitle: String(sourceTask?.title || "").trim(),
+        fromAgentId: String(sourceTask?.agentId || "").trim() || null,
+        summary: String(output?.summary || "").trim(),
+        deliverable: String(output?.deliverable || "").trim().slice(0, 24000),
+        insights: normalizeStringArray(output?.insights || []).slice(0, 16),
+        nextActions: normalizeStringArray(output?.nextActions || []).slice(0, 24),
+        at: new Date().toISOString(),
+      },
+    };
+  }
+
+  async enqueueAutoHandoffs({ workflowId, task, output }) {
+    if (typeof this.repository.enqueueWorkflowTask !== "function") {
+      return 0;
+    }
+
+    const workflow = await this.repository.getWorkflow(workflowId);
+    if (!workflow) {
+      return 0;
+    }
+    const workflowStatus = String(workflow.status || "").trim().toLowerCase();
+    if (!["pending", "running"].includes(workflowStatus)) {
+      return 0;
+    }
+
+    const handoffTargets = this.getHandoffTargetsFromTask(task);
+    if (handoffTargets.length === 0) {
+      return 0;
+    }
+
+    const workflowTasks = await this.repository.listWorkflowTasks(workflowId);
+    const nodeTemplateMap = this.buildNodeTemplateMap(workflowTasks);
+    const sourceNodeId = resolveTaskNodeId(task);
+    let enqueuedCount = 0;
+
+    for (const targetNodeIdRaw of handoffTargets) {
+      const targetNodeId = String(targetNodeIdRaw || "").trim();
+      if (!targetNodeId) {
+        continue;
+      }
+      const targetTemplate = nodeTemplateMap.get(targetNodeId);
+      if (!targetTemplate) {
+        await this.repository.appendWorkflowEvent({
+          workflowId,
+          taskId: task?.id || null,
+          role: "system",
+          message: `handoff 실패: 대상 노드를 찾을 수 없음 (${targetNodeId})`,
+          meta: {
+            taskKey: task?.taskKey || "",
+            targetNodeId,
+          },
+        });
+        continue;
+      }
+
+      const handoffTask = await this.repository.enqueueWorkflowTask({
+        workflowId,
+        agentId: targetTemplate?.agentId || null,
+        taskKey: `handoff-${targetNodeId}-${randomShortId()}`,
+        title: `${String(targetTemplate?.title || targetNodeId).trim()} · handoff`,
+        kind: "handoff",
+        dependsOnTaskIds: [String(task?.id || "").trim()],
+        input: this.buildHandoffInput({
+          sourceTask: task,
+          output,
+          targetTemplate,
+          targetNodeId,
+        }),
+      });
+      if (!handoffTask) {
+        continue;
+      }
+      enqueuedCount += 1;
+
+      await this.repository.appendWorkflowEvent({
+        workflowId,
+        taskId: handoffTask.id,
+        role: "system",
+        message: `handoff 큐 적재: ${sourceNodeId} -> ${targetNodeId}`,
+        meta: {
+          sourceTaskId: task?.id || null,
+          sourceTaskKey: task?.taskKey || "",
+          sourceNodeId,
+          targetNodeId,
+          handoffTaskId: handoffTask.id,
+          handoffTaskKey: handoffTask.taskKey,
+        },
+      });
+    }
+
+    return enqueuedCount;
   }
 
   normalizeTaskOutput({

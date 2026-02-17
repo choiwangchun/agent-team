@@ -375,6 +375,24 @@
               </select>
               <p class="mt-1 text-[11px] text-slate-500">직렬 노드는 같은 직렬 노드들끼리 순차 실행됩니다.</p>
             </div>
+            <div class="mt-2">
+              <label for="adNodeInstructionInput" class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">초기 업무 지시</label>
+              <textarea
+                id="adNodeInstructionInput"
+                rows="3"
+                placeholder="이 에이전트가 우선 수행할 업무를 적으세요."
+                class="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none ring-electric/30 transition focus:ring"
+              ></textarea>
+            </div>
+            <div class="mt-2">
+              <label for="adNodeHandoffSelect" class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">작업 완료 후 자동 토스 대상</label>
+              <select
+                id="adNodeHandoffSelect"
+                multiple
+                class="min-h-[84px] w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none ring-electric/30 transition focus:ring"
+              ></select>
+              <p class="mt-1 text-[11px] text-slate-500">여러 명을 선택하면 큐에 순서대로 토스합니다. 연결선을 그리지 않아도 동작합니다.</p>
+            </div>
             <div id="adNodeFeatureList" class="mt-2 grid max-h-28 gap-1 overflow-auto pr-1"></div>
             <p id="adNodeFeatureEmpty" class="mt-2 text-xs text-slate-500">데이터 처리 탭에서 feature를 추출하면 여기서 선택할 수 있습니다.</p>
           </div>
@@ -414,6 +432,13 @@
             class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
           >
             상태 새로고침
+          </button>
+          <button
+            id="adStopWorkflowBtn"
+            type="button"
+            class="rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-semibold text-rose-600 transition hover:bg-rose-50"
+          >
+            중단
           </button>
           <p id="adWorkflowMeta" class="text-xs text-slate-500">아직 실행된 workflow가 없습니다.</p>
         </div>
@@ -737,6 +762,8 @@
           featurePoolEmpty: document.getElementById('adFeaturePoolEmpty'),
           selectedNodeMeta: document.getElementById('adSelectedNodeMeta'),
           nodeExecutionModeSelect: document.getElementById('adNodeExecutionModeSelect'),
+          nodeInstructionInput: document.getElementById('adNodeInstructionInput'),
+          nodeHandoffSelect: document.getElementById('adNodeHandoffSelect'),
           nodeFeatureList: document.getElementById('adNodeFeatureList'),
           nodeFeatureEmpty: document.getElementById('adNodeFeatureEmpty'),
           assignAllNodeFeaturesBtn: document.getElementById('adAssignAllNodeFeaturesBtn'),
@@ -746,6 +773,7 @@
           startWorkflowBtn: document.getElementById('adStartWorkflowBtn'),
           tickWorkflowBtn: document.getElementById('adTickWorkflowBtn'),
           refreshWorkflowBtn: document.getElementById('adRefreshWorkflowBtn'),
+          stopWorkflowBtn: document.getElementById('adStopWorkflowBtn'),
           workflowMeta: document.getElementById('adWorkflowMeta'),
           commandLog: document.getElementById('adCommandLog'),
           workflowResultList: document.getElementById('adWorkflowResultList'),
@@ -777,6 +805,10 @@
             failed: {
               label: '실패',
               className: 'bg-rose-100 text-rose-700',
+            },
+            cancelled: {
+              label: '중단',
+              className: 'bg-slate-100 text-slate-700',
             },
             standby: {
               label: '대기',
@@ -2895,8 +2927,23 @@
           return normalizeNodeFeatures(node?.features);
         }
 
+        function getNodeInstruction(node) {
+          return String(node?.instruction || '').trim();
+        }
+
         function getNodeExecutionMode(node) {
           return normalizeExecutionMode(node?.executionMode);
+        }
+
+        function normalizeHandoffTargets(targets, selectedNodeId = '') {
+          const normalized = Array.isArray(targets)
+            ? [...new Set(targets.map((item) => String(item || '').trim()).filter(Boolean))]
+            : [];
+          return normalized.filter((nodeId) => nodeId !== selectedNodeId);
+        }
+
+        function getNodeHandoffTargets(node) {
+          return normalizeHandoffTargets(node?.handoffTargets || [], String(node?.id || ''));
         }
 
         function setNodeExecutionMode(nodeId, executionMode, { rerender = true } = {}) {
@@ -2905,6 +2952,30 @@
             return false;
           }
           node.executionMode = normalizeExecutionMode(executionMode);
+          if (rerender) {
+            renderStudioNodes();
+          }
+          return true;
+        }
+
+        function setNodeHandoffTargets(nodeId, targets, { rerender = true } = {}) {
+          const node = getNodeById(nodeId);
+          if (!node) {
+            return false;
+          }
+          node.handoffTargets = normalizeHandoffTargets(targets, nodeId);
+          if (rerender) {
+            renderStudioNodes();
+          }
+          return true;
+        }
+
+        function setNodeInstruction(nodeId, instruction, { rerender = false } = {}) {
+          const node = getNodeById(nodeId);
+          if (!node) {
+            return false;
+          }
+          node.instruction = String(instruction || '').trim();
           if (rerender) {
             renderStudioNodes();
           }
@@ -2931,6 +3002,8 @@
           const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
           const featurePool = getFeaturePool();
           const modeSelect = ad.nodeExecutionModeSelect;
+          const instructionInput = ad.nodeInstructionInput;
+          const handoffSelect = ad.nodeHandoffSelect;
 
           if (!selectedNode) {
             ad.selectedNodeMeta.textContent = '노드를 클릭하면 사용할 feature를 설정할 수 있습니다.';
@@ -2945,6 +3018,16 @@
               modeSelect.disabled = true;
               modeSelect.classList.add('opacity-60');
             }
+            if (instructionInput) {
+              instructionInput.value = '';
+              instructionInput.disabled = true;
+              instructionInput.classList.add('opacity-60');
+            }
+            if (handoffSelect) {
+              handoffSelect.innerHTML = '';
+              handoffSelect.disabled = true;
+              handoffSelect.classList.add('opacity-60');
+            }
             return;
           }
 
@@ -2953,6 +3036,23 @@
             modeSelect.value = getNodeExecutionMode(selectedNode);
             modeSelect.disabled = false;
             modeSelect.classList.remove('opacity-60');
+          }
+          if (instructionInput) {
+            instructionInput.value = getNodeInstruction(selectedNode);
+            instructionInput.disabled = false;
+            instructionInput.classList.remove('opacity-60');
+          }
+          if (handoffSelect) {
+            const selectedTargets = new Set(getNodeHandoffTargets(selectedNode));
+            const candidateNodes = state.deploymentStudio.nodes.filter((node) => node.id !== selectedNode.id);
+            handoffSelect.innerHTML = candidateNodes
+              .map((node) => {
+                const selected = selectedTargets.has(node.id) ? 'selected' : '';
+                return `<option value="${escapeHtml(node.id)}" ${selected}>${escapeHtml(node.id)} · ${escapeHtml(getNodeTitle(node))}</option>`;
+              })
+              .join('');
+            handoffSelect.disabled = candidateNodes.length === 0;
+            handoffSelect.classList.toggle('opacity-60', candidateNodes.length === 0);
           }
           if (featurePool.length === 0) {
             ad.nodeFeatureList.innerHTML = '';
@@ -3168,6 +3268,7 @@
             ad.startWorkflowBtn,
             ad.tickWorkflowBtn,
             ad.refreshWorkflowBtn,
+            ad.stopWorkflowBtn,
           ].forEach((button) => {
             if (!button) {
               return;
@@ -3206,6 +3307,8 @@
             executionMode: getNodeExecutionMode(node),
             input: {
               features: getNodeFeatures(node),
+              instruction: getNodeInstruction(node),
+              handoffTargets: getNodeHandoffTargets(node),
             },
           }));
         }
@@ -3344,6 +3447,32 @@
           }
         }
 
+        async function stopWorkflowFromStudio() {
+          const workflowId = String(state.deploymentStudio.activeWorkflowId || '').trim();
+          if (!workflowId) {
+            setNotice(ad.notice, '중단할 workflow가 없습니다.', 'info');
+            return;
+          }
+          setWorkflowButtonsBusy(true);
+          try {
+            const response = await requestJson(`/api/workflows/${encodeURIComponent(workflowId)}/stop`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                reason: 'workflow_stopped_by_user',
+              }),
+            });
+            applyWorkflowPayload(response.workflow);
+            stopWorkflowPolling();
+            setNotice(ad.notice, `workflow 중단: ${workflowId.slice(0, 8)}`, 'info');
+            pushStudioLog(`workflow 중단: ${workflowId.slice(0, 8)}`);
+          } catch (error) {
+            setNotice(ad.notice, `workflow 중단 실패: ${error.message}`, 'error');
+          } finally {
+            setWorkflowButtonsBusy(false);
+          }
+        }
+
         function renderConnectModeButton() {
           if (!ad.connectModeBtn) {
             return;
@@ -3475,9 +3604,17 @@
               const skills = Array.isArray(agent?.skills) && agent.skills.length > 0 ? agent.skills.join(', ') : 'none';
               const nodeFeatures = getNodeFeatures(node);
               const executionMode = getNodeExecutionMode(node);
+              const instruction = getNodeInstruction(node);
+              const handoffTargets = getNodeHandoffTargets(node).filter((targetNodeId) =>
+                state.deploymentStudio.nodes.some((item) => item.id === targetNodeId)
+              );
               node.features = nodeFeatures;
               node.executionMode = executionMode;
+              node.instruction = instruction;
+              node.handoffTargets = handoffTargets;
               const featureSummary = nodeFeatures.length > 0 ? truncateForDisplay(nodeFeatures.join(', '), 30) : 'none';
+              const instructionSummary = instruction ? truncateForDisplay(instruction, 28) : 'none';
+              const handoffSummary = handoffTargets.length > 0 ? handoffTargets.join(', ') : 'none';
               const avatar = agent?.avatarUrl
                 ? `<img src="${escapeHtml(agent.avatarUrl)}" alt="${escapeHtml(agent.name)} avatar" class="h-8 w-8 rounded-lg border border-slate-200 bg-white object-cover" />`
                 : '<span class="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-[10px] text-slate-400">N/A</span>';
@@ -3501,6 +3638,8 @@
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">model: ${escapeHtml(agent?.modelTier || 'Balanced (default)')}</p>
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">skills: ${escapeHtml(skills)}</p>
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">mode: ${escapeHtml(executionMode)}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-slate-500">task: ${escapeHtml(instructionSummary)}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-slate-500">handoff: ${escapeHtml(handoffSummary)}</p>
                       <p class="mt-0.5 truncate text-[11px] text-slate-500">features: ${escapeHtml(featureSummary)}</p>
                     </div>
                   </div>
@@ -3536,6 +3675,8 @@
             x: Math.round(safeX),
             y: Math.round(safeY),
             executionMode: 'parallel',
+            instruction: '',
+            handoffTargets: [],
             features: [],
           });
 
@@ -3683,6 +3824,10 @@
           state.deploymentStudio.edges = state.deploymentStudio.edges.filter(
             (edge) => !removedNodeIds.has(edge.from) && !removedNodeIds.has(edge.to)
           );
+          state.deploymentStudio.nodes = state.deploymentStudio.nodes.map((node) => ({
+            ...node,
+            handoffTargets: getNodeHandoffTargets(node).filter((targetNodeId) => !removedNodeIds.has(targetNodeId)),
+          }));
           if (removedNodeIds.has(state.deploymentStudio.selectedNodeId)) {
             state.deploymentStudio.selectedNodeId = null;
           }
@@ -4077,6 +4222,23 @@
             setNodeExecutionMode(selectedNode.id, ad.nodeExecutionModeSelect.value);
           });
 
+          ad.nodeInstructionInput?.addEventListener('input', () => {
+            const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
+            if (!selectedNode) {
+              return;
+            }
+            setNodeInstruction(selectedNode.id, ad.nodeInstructionInput.value, { rerender: true });
+          });
+
+          ad.nodeHandoffSelect?.addEventListener('change', () => {
+            const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
+            if (!selectedNode) {
+              return;
+            }
+            const selectedTargets = Array.from(ad.nodeHandoffSelect.selectedOptions || []).map((option) => option.value);
+            setNodeHandoffTargets(selectedNode.id, selectedTargets);
+          });
+
           ad.assignAllNodeFeaturesBtn?.addEventListener('click', () => {
             const selectedNode = getNodeById(state.deploymentStudio.selectedNodeId);
             if (!selectedNode) {
@@ -4110,6 +4272,10 @@
 
           ad.refreshWorkflowBtn?.addEventListener('click', async () => {
             await refreshActiveWorkflow();
+          });
+
+          ad.stopWorkflowBtn?.addEventListener('click', async () => {
+            await stopWorkflowFromStudio();
           });
         }
 
