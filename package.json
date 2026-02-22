@@ -1,0 +1,30 @@
+{
+  "name": "kairo-agent",
+  "version": "1.0.0",
+  "description": "Node.js + Tailwind kairo Agent dashboard starter",
+  "main": "server.js",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/input.css -o ./public/css/tailwind.css --minify",
+    "watch:css": "tailwindcss -i ./src/input.css -o ./public/css/tailwind.css --watch",
+    "start": "npm run build:css && node server.js",
+    "dev": "npm run build:css && (npm run watch:css & node --watch server.js)",
+    "perf:bench": "bash ./scripts/perf-benchmark.sh",
+    "sync:avatars": "node scripts/sync-avatars-to-supabase.js",
+    "prepare:avatars:subset": "node scripts/prepare-avatar-subset.js",
+    "sync:avatars:subset": "npm run prepare:avatars:subset && npm run sync:avatars -- .cache/avatar-subset"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.58.0",
+    "bcryptjs": "^3.0.3",
+    "ejs": "^4.0.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.0.2",
+    "pg": "^8.18.0",
+    "tailwindcss": "^3.4.17",
+    "xlsx": "^0.18.5"
+  }
+}

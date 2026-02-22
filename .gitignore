@@ -1,0 +1,12 @@
+node_modules/
+avatars/
+.cache/
+.DS_Store
+.env
+.env*.tmp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+__pycache__/
+*.pyc

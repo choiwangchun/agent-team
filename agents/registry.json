@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "frontend-design",
+      "name": "Frontend Design Agent",
+      "path": "agents/frontend-design-agent.md",
+      "focus": "UI/UX design system, interaction quality, accessibility"
+    },
+    {
+      "id": "frontend-architecture",
+      "name": "Frontend Architecture Agent",
+      "path": "agents/frontend-architecture-agent.md",
+      "focus": "frontend structure, state boundaries, scalability"
+    },
+    {
+      "id": "backend-engineer",
+      "name": "Backend Engineer Agent",
+      "path": "agents/backend-engineer-agent.md",
+      "focus": "API reliability, data modeling, security, observability"
+    },
+    {
+      "id": "ceo",
+      "name": "CEO Agent",
+      "path": "agents/ceo-agent.md",
+      "focus": "business priorities, ROI allocation, strategic focus"
+    },
+    {
+      "id": "cto",
+      "name": "CTO Agent",
+      "path": "agents/cto-agent.md",
+      "focus": "technical strategy, platform quality, engineering execution"
+    },
+    {
+      "id": "marketer",
+      "name": "Marketer Agent",
+      "path": "agents/marketer-agent.md",
+      "focus": "positioning, demand generation, funnel conversion"
+    },
+    {
+      "id": "nodejs-optimization",
+      "name": "Node.js Optimization Agent",
+      "path": "agents/nodejs-optimization-agent.md",
+      "focus": "runtime performance, latency, memory, cost efficiency"
+    }
+  ]
+}
